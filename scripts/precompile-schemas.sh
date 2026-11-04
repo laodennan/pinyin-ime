@@ -32,6 +32,14 @@ if [[ ! -x "$DEPS/dist/bin/rime_deployer" ]]; then
   tar -xjf "$DEPS/rime-deps.tar.bz2" -C "$DEPS"
 fi
 
+# 瘦身不变量守卫（PLAN 9.6）：预编译前确认组装产物里没有 tencent 大词库。
+# 正常路径下 fetch-rime-ice.sh 已排除并自检；这里再挡一道，防止手工组装
+# 或缓存串味把 98 万词条的大词库带进 .bin（键盘扩展内存峰值的最大来源）。
+if [[ -e "$DATA/cn_dicts/tencent.dict.yaml" ]] || grep -q 'cn_dicts/tencent' "$DATA/rime_ice.dict.yaml"; then
+  echo "error: tencent dict present in SharedData; re-run scripts/fetch-rime-ice.sh" >&2
+  exit 1
+fi
+
 echo "== deployer =="
 ls -la "$DEPS/dist/bin/rime_deployer"
 
