@@ -1,0 +1,12 @@
+# XcodeGen 生成物（project.yml 为唯一事实源）
+*.xcodeproj
+
+# CI 组装的 Rime 数据（体积大，不入 git；由 scripts/fetch-rime-ice.sh 生成）
+Keyboard/SharedData/
+.deps/
+
+# 构建产物
+build/
+DerivedData/
+*.ipa
+xcuserdata/

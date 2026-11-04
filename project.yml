@@ -1,0 +1,72 @@
+# XcodeGen 工程定义 —— 唯一事实源，CI 中 `xcodegen generate` 后构建。
+# 取舍理由见 PLAN.md 4.3。Bundle ID 已定版（2026-11-04）：com.mrzhao.pinyinime。
+name: PinyinIME
+options:
+  bundleIdPrefix: com.mrzhao
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  # 路线 A：librime 1.16.1 预编译 SPM 包（已内嵌 librime-lua）。见 PLAN.md 1.2 / Vendor/README.md。
+  LibrimeKit:
+    url: https://github.com/zhanggenlove/LibrimeKit
+    from: "0.1.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  PinyinIME:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mrzhao.pinyinime
+    sources:
+      - App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: 拼音输入法
+        UILaunchScreen: {}
+    dependencies:
+      - target: PinyinKeyboard
+        embed: true
+  PinyinKeyboard:
+    type: app-extension
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mrzhao.pinyinime.keyboard
+    sources:
+      - Keyboard
+    info:
+      path: Keyboard/Info.plist
+      properties:
+        CFBundleDisplayName: 拼音键盘
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrimaryLanguage: zh-Hans
+            # 设置同步等增强功能需要完全访问；核心打字（引擎+userdb 在扩展沙盒内）不依赖它。见 PLAN.md 4.2。
+            RequestsOpenAccess: true
+    dependencies:
+      - package: LibrimeKit
+        product: LibrimeKit
+    # Rime 数据由 CI 在 xcodegen 之前组装到 Keyboard/SharedData（见 workflow），
+    # 以文件夹引用整体打包进扩展；本地不存在该目录时不要在本机 generate。
+    resources:
+      - path: Keyboard/SharedData
+        type: folder
+  PinyinIMETests:
+    type: bundle.unit-test
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mrzhao.pinyinime.tests
+    sources:
+      - Tests
+    dependencies:
+      - target: PinyinKeyboard
