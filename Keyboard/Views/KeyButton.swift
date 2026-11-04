@@ -70,7 +70,7 @@ final class KeyButton: UIButton {
     override init(frame: CGRect) {
         super.init(frame: frame)
         titleLabel?.textAlignment = .center
-        layer.cornerRadius = 5
+        layer.cornerRadius = 8
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOffset = CGSize(width: 0, height: 1)
         layer.shadowRadius = 0

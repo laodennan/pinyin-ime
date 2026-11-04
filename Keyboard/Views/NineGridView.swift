@@ -1,18 +1,25 @@
 import UIKit
 
-/// 九宫格（T9）面板：左侧拼音选择条 + 主区 4×3 数字键 + 右侧功能列。
+/// 九宫格（T9）面板（实现轮 4 重做）：照苹果原生简体拼音九宫格——整宽
+/// 5 列 × 4 行，无左侧音节条、无右侧功能列；音节选项已搬进候选栏顶部。
 ///
-/// 数字键与 26 键同样走「按下弹窗、滑动跟随、抬起输入」（PopupKeyTracker），
-/// 弹窗只显示数字本体。0 键兼空格：点按（抬起触发）走 .spaceOrCommit 语义，
-/// 长按切换为光标触控板（onSpaceTrackpad），与 26 键空格同一套回调约定。
-/// 地球键（如需显示）固定在音节条列底部，音节条滚动区随之缩短。
+/// 键位语义全部经 onAction 交 VC 解释，本视图只管渲染与手势：
+/// - 字母键（ABC…WXYZ=T9 数字 2–9）与标点键走 PopupKeyTracker：
+///   按下弹气泡（字母组 / 「，」）、滑动跟随、抬起输入；
+/// - 标点键长按出变体条 [，。？！、；：]，选定经 onVariantInput 直插（VC）；
+/// - 中英键点按切换中/英（抬起触发），长按 = 切回 26 键（气泡提示「26键」，
+///   长按成立时抑制本次点按，长按处理直接发 .switchToFull26）；
+/// - 选定键 = 空格/选词（抬起触发），长按切换为光标触控板（onSpaceTrackpad）；
+/// - 退格连发；所有键统一底色（不设 isFunctionKey），仅确认键可 isAccent。
+/// 地球键（如需显示）放在网格下方一条 44pt 行里居左，同 FullKeyboardView
+/// 的处理（目标-动作直挂 handleInputModeList，需要真实触摸事件）。
 final class NineGridView: UIView {
     var onAction: ((NineGridKeyAction) -> Void)?
-    var onPinSyllables: (([String]) -> Void)?
+    /// 标点长按变体被选定：字面量字符串，VC 先提交组合串再直插。
+    var onVariantInput: ((String) -> Void)?
     var onSpaceTrackpad: ((SpaceTrackpadPhase, CGFloat) -> Void)?
 
-    /// 地球键的目标-动作接线（同 FullKeyboardView：切换键盘必须走
-    /// handleInputModeList 的真实触摸事件）。VC 的注入晚于本视图 init，
+    /// 地球键的目标-动作接线（见类注释）。VC 的注入晚于本视图 init，
     /// 故用 didSet 挂接；未接线时退回 onAction(.nextKeyboard)。
     weak var globeTarget: AnyObject? {
         didSet { wireGlobe() }
@@ -37,14 +44,10 @@ final class NineGridView: UIView {
         }
     }
 
-    private let stripScroll = UIScrollView()
-    private var stripButtons: [UIButton] = []
-    private var stripEntries: [(label: String, syllables: [String])] = []
     private let globeButton = KeyButton()
-
-    private var gridButtons: [[KeyButton]] = []
+    private var placedButtons: [(button: KeyButton, placement: NineGridKeyPlacement)] = []
     private var digitButtons: [KeyButton] = []
-    private var sideButtons: [KeyButton] = []
+    private var punctButton: KeyButton?
     private var returnButton: KeyButton?
     private var asciiButton: KeyButton?
     private var spaceButton: KeyButton?
@@ -53,21 +56,29 @@ final class NineGridView: UIView {
     private var presenter: KeyPopupPresenter!
     private var tracker: PopupKeyTracker!
 
-    private let stripWidth: CGFloat = 56
-    private let sideWidth: CGFloat = 54
+    private let hInset: CGFloat = 3
     private let hSpacing: CGFloat = 6
     private let vSpacing: CGFloat = 10
+    private let globeRowHeight: CGFloat = 44
+
+    /// 标点键长按变体（顺序同苹果：点按的「，」在首位）。
+    static let punctVariants = ["，", "。", "？", "！", "、", "；", "："]
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
         presenter = KeyPopupPresenter()
         tracker = PopupKeyTracker(presenter: presenter) { [weak self] point in
-            self?.hitTestDigit(at: point)
+            self?.hitTestTracked(at: point)
         }
-        buildStrip()
+        tracker.onVariantInput = { [weak self] text in self?.onVariantInput?(text) }
+        // 气泡文案：字母键显示字母组（= 键面标题）；标点键显示点按将插入的「，」。
+        tracker.textForKey = { [weak self] button in
+            if let self, button === self.punctButton { return "，" }
+            return button.title(for: .normal) ?? ""
+        }
         buildGrid()
-        buildSideColumn()
+        buildGlobe()
         addSubview(presenter)
     }
 
@@ -76,11 +87,7 @@ final class NineGridView: UIView {
 
     // MARK: 构建
 
-    private func buildStrip() {
-        stripScroll.showsVerticalScrollIndicator = false
-        stripScroll.isMultipleTouchEnabled = true
-        addSubview(stripScroll)
-
+    private func buildGlobe() {
         globeButton.setTitle("🌐", for: .normal)
         globeButton.titleLabel?.font = .systemFont(ofSize: 17)
         globeButton.isFunctionKey = true
@@ -89,14 +96,7 @@ final class NineGridView: UIView {
         addSubview(globeButton)
     }
 
-    private func makeDigitButton(_ spec: NineGridKeySpec) -> KeyButton {
-        let button = KeyButton()
-        button.setTitle(spec.label, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 23)
-        button.keySubLabel = spec.subLabel
-        button.defersActionToRelease = true
-        let action = spec.action
-        button.onPress = { [weak self] in self?.onAction?(action) }
+    private func wireTracker(_ button: KeyButton) {
         button.onTouchEvent = { [weak self] btn, touch, phase in
             guard let self else { return }
             switch phase {
@@ -106,79 +106,78 @@ final class NineGridView: UIView {
             case .cancelled: self.tracker.touchCancelled(touch, in: self)
             }
         }
-        digitButtons.append(button)
-        addSubview(button)
-        return button
     }
 
     private func buildGrid() {
-        gridButtons = NineGridLayout.grid.map { row in
-            row.map { spec in
-                switch spec.action {
-                case .digit:
-                    return makeDigitButton(spec)
-                case .toggleAscii:
-                    let button = KeyButton()
-                    button.setTitle(spec.label, for: .normal)
-                    button.titleLabel?.font = .systemFont(ofSize: 16)
-                    button.isFunctionKey = true
-                    button.onPress = { [weak self] in self?.onAction?(.toggleAscii) }
-                    asciiButton = button
-                    addSubview(button)
-                    return button
-                case .spaceOrCommit:
-                    let button = KeyButton()
-                    button.setTitle(spec.label, for: .normal)
-                    button.titleLabel?.font = .systemFont(ofSize: 23)
-                    button.keySubLabel = spec.subLabel
-                    button.defersActionToRelease = true
-                    button.firesActionOnReleaseLocally = true
-                    button.onPress = { [weak self] in self?.onAction?(.spaceOrCommit) }
-                    let lp = UILongPressGestureRecognizer(target: self, action: #selector(spaceLongPressed(_:)))
-                    lp.minimumPressDuration = 0.35
-                    lp.cancelsTouchesInView = false
-                    button.addGestureRecognizer(lp)
-                    spaceButton = button
-                    addSubview(button)
-                    return button
-                case .backspace:
-                    let button = KeyButton()
-                    button.setTitle(spec.label, for: .normal)
-                    button.titleLabel?.font = .systemFont(ofSize: 19)
-                    button.isFunctionKey = true
-                    button.repeatEnabled = true
-                    button.onPress = { [weak self] in self?.onAction?(.backspace) }
-                    addSubview(button)
-                    return button
-                default:
-                    // grid 模型里只有以上四类动作；其余动作都在 sideColumn。
-                    let button = KeyButton()
-                    button.setTitle(spec.label, for: .normal)
-                    addSubview(button)
-                    return button
-                }
-            }
-        }
-    }
-
-    private func buildSideColumn() {
-        sideButtons = NineGridLayout.sideColumn.map { spec in
+        for placement in NineGridLayout.placements {
+            let spec = placement.spec
             let button = KeyButton()
             button.setTitle(spec.label, for: .normal)
-            button.titleLabel?.font = .systemFont(ofSize: 16)
-            button.isFunctionKey = true
             let action = spec.action
-            button.onPress = { [weak self] in self?.onAction?(action) }
-            if spec.action == .enter { returnButton = button }
+            switch spec.action {
+            case .digit:
+                button.titleLabel?.font = .systemFont(ofSize: 21)
+                button.defersActionToRelease = true
+                button.onPress = { [weak self] in self?.onAction?(action) }
+                wireTracker(button)
+                digitButtons.append(button)
+            case .punctuation:
+                button.titleLabel?.font = .systemFont(ofSize: 15)
+                button.defersActionToRelease = true
+                button.onPress = { [weak self] in self?.onAction?(action) }
+                wireTracker(button)
+                let lp = UILongPressGestureRecognizer(target: self, action: #selector(punctLongPressed(_:)))
+                lp.minimumPressDuration = 0.38
+                lp.cancelsTouchesInView = false
+                button.addGestureRecognizer(lp)
+                punctButton = button
+            case .backspace:
+                button.titleLabel?.font = .systemFont(ofSize: 19)
+                button.repeatEnabled = true
+                button.onPress = { [weak self] in self?.onAction?(action) }
+            case .toggleAscii:
+                button.titleLabel?.font = .systemFont(ofSize: 16)
+                // 抬起才触发点按语义：长按（切 26 键）成立时来得及抑制。
+                button.defersActionToRelease = true
+                button.firesActionOnReleaseLocally = true
+                button.onPress = { [weak self] in self?.onAction?(action) }
+                let lp = UILongPressGestureRecognizer(target: self, action: #selector(asciiLongPressed(_:)))
+                lp.minimumPressDuration = 0.38
+                lp.cancelsTouchesInView = false
+                button.addGestureRecognizer(lp)
+                asciiButton = button
+            case .spaceOrCommit:
+                button.titleLabel?.font = .systemFont(ofSize: 16)
+                button.defersActionToRelease = true
+                button.firesActionOnReleaseLocally = true
+                button.onPress = { [weak self] in self?.onAction?(action) }
+                let lp = UILongPressGestureRecognizer(target: self, action: #selector(spaceLongPressed(_:)))
+                lp.minimumPressDuration = 0.35
+                lp.cancelsTouchesInView = false
+                button.addGestureRecognizer(lp)
+                spaceButton = button
+            case .enter:
+                button.titleLabel?.font = .systemFont(ofSize: 16)
+                button.onPress = { [weak self] in self?.onAction?(action) }
+                returnButton = button
+            case .symbolsEmojiPage:
+                button.titleLabel?.font = .systemFont(ofSize: 20)
+                button.onPress = { [weak self] in self?.onAction?(action) }
+            default:
+                // symbolsPage / separator / toggleSyllables：即时触发。
+                button.titleLabel?.font = .systemFont(ofSize: 16)
+                button.onPress = { [weak self] in self?.onAction?(action) }
+            }
             addSubview(button)
-            return button
+            placedButtons.append((button, placement))
         }
     }
 
     // MARK: 状态外观
 
+    /// 中/英状态：中文模式键面标「ABC」（点按去英文），英文模式标「拼音」。
     func setAsciiMode(_ ascii: Bool) {
-        asciiButton?.setTitle(ascii ? "英" : "中", for: .normal)
+        asciiButton?.setTitle(ascii ? "拼音" : "ABC", for: .normal)
     }
 
     func setReturnKeyTitle(_ title: String) {
@@ -189,41 +188,32 @@ final class NineGridView: UIView {
         returnButton?.isAccent = accent
     }
 
-    // MARK: 音节条
+    // MARK: 手势
 
-    /// 以当前数字串的切分选项重建音节条（点选即锁定对应音节序列）。
-    func updateSyllableStrip(entries: [(label: String, syllables: [String])]) {
-        stripEntries = entries
-        stripButtons.forEach { $0.removeFromSuperview() }
-        stripButtons = entries.enumerated().map { index, entry in
-            let button = UIButton(type: .system)
-            button.setTitle(entry.label, for: .normal)
-            button.titleLabel?.font = .systemFont(ofSize: 15)
-            button.tag = index
-            button.layer.cornerRadius = 6
-            button.backgroundColor = UIColor { tc in
-                tc.userInterfaceStyle == .dark
-                    ? UIColor(white: 0.28, alpha: 1)
-                    : UIColor(red: 0.88, green: 0.89, blue: 0.92, alpha: 1)
-            }
-            button.setTitleColor(UIColor { tc in
-                tc.userInterfaceStyle == .dark ? .white : .black
-            }, for: .normal)
-            button.addTarget(self, action: #selector(stripTapped(_:)), for: .touchUpInside)
-            stripScroll.addSubview(button)
-            return button
+    @objc private func punctLongPressed(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began,
+              let button = recognizer.view as? KeyButton
+        else { return }
+        tracker.beginVariants(for: button, variants: Self.punctVariants,
+                              at: recognizer.location(in: self), in: self)
+    }
+
+    /// 中英键长按 = 切回 26 键：气泡提示 + 抑制本次点按的中英切换。
+    @objc private func asciiLongPressed(_ recognizer: UILongPressGestureRecognizer) {
+        guard let button = asciiButton else { return }
+        switch recognizer.state {
+        case .began:
+            button.suppressNextReleaseAction = true
+            presenter.showMagnifier(above: button.frame, text: "26键")
+            onAction?(.switchToFull26)
+        case .ended, .cancelled, .failed:
+            presenter.hide()
+        default:
+            break
         }
-        stripScroll.setContentOffset(.zero, animated: false)
-        setNeedsLayout()
     }
 
-    @objc private func stripTapped(_ sender: UIButton) {
-        guard stripEntries.indices.contains(sender.tag) else { return }
-        onPinSyllables?(stripEntries[sender.tag].syllables)
-    }
-
-    // MARK: 触控板（0 键长按）
-
+    /// 选定键长按 = 光标触控板（同 26 键空格的约定）。
     @objc private func spaceLongPressed(_ recognizer: UILongPressGestureRecognizer) {
         guard let space = spaceButton else { return }
         switch recognizer.state {
@@ -240,12 +230,14 @@ final class NineGridView: UIView {
         }
     }
 
-    // MARK: 命中测试（弹窗滑动跟随）
+    // MARK: 命中测试（弹窗滑动跟随：字母键 + 标点键）
 
-    private func hitTestDigit(at point: CGPoint) -> KeyButton? {
-        if let hit = digitButtons.first(where: { $0.frame.contains(point) }) { return hit }
+    private func hitTestTracked(at point: CGPoint) -> KeyButton? {
+        var tracked = digitButtons
+        if let punctButton { tracked.append(punctButton) }
+        if let hit = tracked.first(where: { $0.frame.contains(point) }) { return hit }
         // 行列间隙吸附最近键，避免滑动途中弹窗闪烁消失。
-        return digitButtons.first(where: { $0.frame.insetBy(dx: -3, dy: -5).contains(point) })
+        return tracked.first(where: { $0.frame.insetBy(dx: -3, dy: -5).contains(point) })
     }
 
     // MARK: 布局
@@ -253,40 +245,23 @@ final class NineGridView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         presenter.frame = bounds
-        let globeHeight: CGFloat = showsGlobeButton ? 44 : 0
-        stripScroll.frame = CGRect(x: 0, y: 0, width: stripWidth,
-                                   height: bounds.height - globeHeight)
+        let globeHeight: CGFloat = showsGlobeButton ? globeRowHeight : 0
         globeButton.frame = CGRect(x: 0, y: bounds.height - globeHeight,
-                                   width: stripWidth, height: globeHeight)
-        // 音节条内按钮纵向堆叠。
-        var stripY: CGFloat = 0
-        for button in stripButtons {
-            button.frame = CGRect(x: 3, y: stripY, width: stripWidth - 6, height: 34)
-            stripY += 34 + 6
-        }
-        stripScroll.contentSize = CGSize(width: stripWidth, height: stripY)
-
-        let gridX = stripWidth + hSpacing
-        let gridWidth = bounds.width - gridX - sideWidth - hSpacing
-        let rowCount = CGFloat(NineGridLayout.grid.count)
-        let rowHeight = (bounds.height - vSpacing * (rowCount - 1)) / rowCount
-        for (rowIndex, row) in gridButtons.enumerated() {
-            let y = CGFloat(rowIndex) * (rowHeight + vSpacing)
-            let cellWidth = (gridWidth - hSpacing * CGFloat(row.count - 1)) / CGFloat(row.count)
-            for (colIndex, button) in row.enumerated() {
-                button.frame = CGRect(x: gridX + CGFloat(colIndex) * (cellWidth + hSpacing),
-                                      y: y, width: cellWidth, height: rowHeight)
-            }
-        }
-        // 右侧列：回车占前两行高，26 键/符各占一行。
-        let sideX = bounds.width - sideWidth
-        if sideButtons.count == 3 {
-            sideButtons[0].frame = CGRect(x: sideX, y: 0, width: sideWidth,
-                                          height: rowHeight * 2 + vSpacing)
-            sideButtons[1].frame = CGRect(x: sideX, y: rowHeight * 2 + vSpacing * 2,
-                                          width: sideWidth, height: rowHeight)
-            sideButtons[2].frame = CGRect(x: sideX, y: rowHeight * 3 + vSpacing * 3,
-                                          width: sideWidth, height: rowHeight)
+                                   width: 56, height: globeHeight)
+        let gridHeight = bounds.height - globeHeight
+        let cellWidth = (bounds.width - hInset * 2
+                         - hSpacing * CGFloat(NineGridLayout.columnCount - 1))
+                        / CGFloat(NineGridLayout.columnCount)
+        let rowHeight = (gridHeight - vSpacing * CGFloat(NineGridLayout.rowCount - 1))
+                        / CGFloat(NineGridLayout.rowCount)
+        for (button, placement) in placedButtons {
+            let x = hInset + CGFloat(placement.col) * (cellWidth + hSpacing)
+            let y = CGFloat(placement.row) * (rowHeight + vSpacing)
+            let w = cellWidth * CGFloat(placement.colSpan)
+                    + hSpacing * CGFloat(placement.colSpan - 1)
+            let h = rowHeight * CGFloat(placement.rowSpan)
+                    + vSpacing * CGFloat(placement.rowSpan - 1)
+            button.frame = CGRect(x: x, y: y, width: w, height: h)
         }
     }
 }
