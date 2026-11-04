@@ -58,9 +58,24 @@ final class KeyboardViewController: UIInputViewController {
     private var selfEditExpectation: String?
     private var hasSelfEditExpectation = false
     private var selfEditSelectionEcho = false
+    /// 刚发生过一次上屏提交（refresh / commitCompositionIfAny drain 到文本）：
+    /// noteSelfEdit 据此决定是否值得读宿主上下文存预期值（实现轮 4 卡顿优化）。
+    private var lastEditWasCommit = false
 
-    private let candidateBarHeight: CGFloat = 40
-    private let keyboardHeight: CGFloat = 236
+    // 候选点选来源长度校验（实现轮 4）：候选改有界切片后，全量总数不再
+    // 每键可得，点选下标改以「来源视图当前展示的列表长度」为界校验。
+    private var barDisplayedCount = 0
+    private var expandedDisplayedCount = 0
+    /// 「选拼音」键手动关闭音节行的标记（当前 T9 组合期间有效，组合清
+    /// 空时在 updateCandidateUI 里复位）。
+    private var syllableRowUserHidden = false
+
+    // 高度构成（实现轮 4）：候选栏 40（音节行可见时 76）+ 面板
+    // （26 键/符号 236、九宫格 250、展开列表 308），统一走 updateHeight()。
+    private let barBaseHeight: CGFloat = 40
+    private let barTallHeight: CGFloat = 76
+    private let lettersPanelHeight: CGFloat = 236
+    private let nineGridPanelHeight: CGFloat = 250
     private let expandedListHeight: CGFloat = 308
 
     // MARK: 生命周期
@@ -133,11 +148,18 @@ final class KeyboardViewController: UIInputViewController {
         statusLabel.isUserInteractionEnabled = false
         view.addSubview(statusLabel)
 
-        candidateBar.onSelectCandidate = { [weak self] in self?.selectGlobalCandidate($0) }
+        candidateBar.onSelectCandidate = { [weak self] index in
+            guard let self else { return }
+            self.selectGlobalCandidate(index, displayedCount: self.barDisplayedCount)
+        }
         candidateBar.onExpand = { [weak self] in self?.setCandidatesExpanded(true) }
+        candidateBar.onPinSyllables = { [weak self] in self?.handlePinSyllables($0) }
         view.addSubview(candidateBar)
 
-        candidateList.onSelectCandidate = { [weak self] in self?.selectGlobalCandidate($0) }
+        candidateList.onSelectCandidate = { [weak self] index in
+            guard let self else { return }
+            self.selectGlobalCandidate(index, displayedCount: self.expandedDisplayedCount)
+        }
         candidateList.onClose = { [weak self] in self?.setCandidatesExpanded(false) }
         candidateList.isHidden = true
         view.addSubview(candidateList)
@@ -159,14 +181,14 @@ final class KeyboardViewController: UIInputViewController {
         view.addSubview(symbolKeyboard)
 
         nineGrid.onAction = { [weak self] in self?.handleNineGridAction($0) }
-        nineGrid.onPinSyllables = { [weak self] in self?.handlePinSyllables($0) }
+        nineGrid.onVariantInput = { [weak self] in self?.handleVariantInput($0) }
         nineGrid.onSpaceTrackpad = { [weak self] in self?.handleSpaceTrackpad($0, dx: $1) }
         nineGrid.globeTarget = self
         nineGrid.globeAction = #selector(handleInputModeList(from:with:))
         nineGrid.isHidden = true
         view.addSubview(nineGrid)
 
-        heightConstraint = view.heightAnchor.constraint(equalToConstant: candidateBarHeight + keyboardHeight)
+        heightConstraint = view.heightAnchor.constraint(equalToConstant: barBaseHeight + lettersPanelHeight)
         heightConstraint?.priority = UILayoutPriority(999)
         heightConstraint?.isActive = true
         applyVisibility()
@@ -175,14 +197,33 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let width = view.bounds.width
-        statusLabel.frame = CGRect(x: 0, y: candidateBarHeight, width: width, height: keyboardHeight)
-        candidateBar.frame = CGRect(x: 0, y: 0, width: width, height: candidateBarHeight)
-        let contentHeight = view.bounds.height - candidateBarHeight
-        let contentFrame = CGRect(x: 0, y: candidateBarHeight, width: width, height: contentHeight)
+        let barHeight = currentCandidateBarHeight()
+        statusLabel.frame = CGRect(x: 0, y: barHeight, width: width, height: currentPanelHeight())
+        candidateBar.frame = CGRect(x: 0, y: 0, width: width, height: barHeight)
+        let contentHeight = view.bounds.height - barHeight
+        let contentFrame = CGRect(x: 0, y: barHeight, width: width, height: contentHeight)
         fullKeyboard.frame = contentFrame
         symbolKeyboard.frame = contentFrame
         candidateList.frame = contentFrame
         nineGrid.frame = contentFrame
+    }
+
+    // MARK: 高度（候选栏高 + 面板高，布局/页/音节行/展开态变化时统一重算）
+
+    private func currentCandidateBarHeight() -> CGFloat {
+        // 展开列表态音节行隐藏，候选栏恒为基础高。
+        if candidatesExpanded { return barBaseHeight }
+        return candidateBar.syllableRowVisible ? barTallHeight : barBaseHeight
+    }
+
+    private func currentPanelHeight() -> CGFloat {
+        if candidatesExpanded { return expandedListHeight }
+        if page == .letters, layoutMode == .nineGrid { return nineGridPanelHeight }
+        return lettersPanelHeight
+    }
+
+    private func updateHeight() {
+        heightConstraint?.constant = currentCandidateBarHeight() + currentPanelHeight()
     }
 
     private func applyVisibility() {
@@ -194,6 +235,7 @@ final class KeyboardViewController: UIInputViewController {
         symbolKeyboard.isHidden = candidatesExpanded || page != .symbols
         fullKeyboard.isHidden = candidatesExpanded || page != .letters || layoutMode != .full26
         nineGrid.isHidden = candidatesExpanded || page != .letters || layoutMode != .nineGrid
+        updateHeight()
     }
 
     // MARK: 引擎启动
@@ -233,8 +275,20 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func noteSelfEdit() {
-        selfEditExpectation = textDocumentProxy.documentContextBeforeInput
-        hasSelfEditExpectation = true
+        // 卡顿优化（实现轮 4）：documentContextBeforeInput 是一次宿主 IPC，
+        // 普通打字（无组合串的直插/删文档字）每键读它纯属浪费——只有当前
+        // 有组合串、或刚刚发生过上屏提交时，预期值才对宿主变化检测有意义，
+        // 这时才读并登记；否则只清预期、保留「吞一次选择回声」的标记位
+        // （handlePossibleHostChange 的判定链不变：无组合串时它先行返回，
+        // 有组合串且无预期时靠回声标记吞掉自家部分上屏的尾随事件）。
+        if hasComposition || lastEditWasCommit {
+            selfEditExpectation = textDocumentProxy.documentContextBeforeInput
+            hasSelfEditExpectation = true
+        } else {
+            selfEditExpectation = nil
+            hasSelfEditExpectation = false
+        }
+        lastEditWasCommit = false
         selfEditSelectionEcho = true
     }
 
@@ -268,15 +322,13 @@ final class KeyboardViewController: UIInputViewController {
     private func refresh() {
         guard engine.isReady else { return }
         if let commit = engine.drainCommitText() {
+            lastEditWasCommit = true
             proxyInsert(commit)
         }
         if layoutMode == .nineGrid, page == .letters {
             syncT9Consumption()
         }
         updateCandidateUI()
-        if layoutMode == .nineGrid {
-            nineGrid.updateSyllableStrip(entries: t9?.stripOptions() ?? [])
-        }
         if !hasComposition {
             hasSelfEditExpectation = false
             selfEditSelectionEcho = false
@@ -284,18 +336,38 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateCandidateUI() {
-        let menu = engine.menu
-        let all = engine.allCandidates()
-        let highlighted = globalHighlightedIndex(menu: menu, totalCount: all.count)
-        let preedit = displayPreedit(enginePreedit: engine.composition.preedit)
-        candidateBar.update(preedit: preedit, candidates: all, highlightedGlobalIndex: highlighted)
+        // 一次快照取齐 composition+menu（原先各读一次 RimeGetContext）；
+        // 候选改有界切片：栏取前 48、展开列表取前 360，不再每键全量迭代。
+        let snap = engine.snapshot()
+        let barCandidates = engine.candidatesSlice(from: 0, count: 48)
+        barDisplayedCount = barCandidates.count
+        let preedit = displayPreedit(enginePreedit: snap.composition.preedit)
+        // 高亮全量下标：totalCount 以切片长度为已知下限——切片未取满时即
+        // 精确总数；取满（总数 > 48）时末页起始下标为近似值，仅影响高亮
+        // 底色的渲染位置，不影响点选换算（点选只用页大小与页号）。
+        let highlighted = globalHighlightedIndex(menu: snap.menu, totalCount: barCandidates.count)
+        candidateBar.update(preedit: preedit, candidates: barCandidates,
+                            highlightedGlobalIndex: highlighted)
+        // 音节选项行（候选栏顶部）：T9 组合活跃时自动显示，「选拼音」键
+        // 可在组合期间手动关/开；展开列表态恒隐藏。
+        let t9Active = layoutMode == .nineGrid && page == .letters && (t9?.isActive ?? false)
+        if !t9Active { syllableRowUserHidden = false }
+        let entries = t9Active ? (t9?.stripOptions() ?? []) : []
+        let showRow = t9Active && !entries.isEmpty && !syllableRowUserHidden && !candidatesExpanded
+        candidateBar.setSyllableRow(entries: entries, visible: showRow)
         if candidatesExpanded {
-            candidateList.update(preedit: preedit, candidates: all, highlightedGlobalIndex: highlighted)
-            if all.isEmpty { setCandidatesExpanded(false) }
+            let expanded = engine.candidatesSlice(from: 0, count: 360)
+            expandedDisplayedCount = expanded.count
+            let listHighlighted = globalHighlightedIndex(menu: snap.menu, totalCount: expanded.count)
+            candidateList.update(preedit: preedit, candidates: expanded,
+                                 highlightedGlobalIndex: listHighlighted)
+            if expanded.isEmpty { setCandidatesExpanded(false) }
         }
+        updateHeight()
     }
 
-    /// 候选栏预编辑文本：九宫格用前端渲染（切分拼音 + 数字串，PLAN 3.2），
+    /// 候选栏预编辑文本：九宫格用前端渲染（只显示切分音节 + 未切分尾巴
+    /// 数字，实现轮 4 起去掉「（全部数字串）」尾巴，PLAN 3.2），
     /// 其余情况用引擎 preedit。
     private func displayPreedit(enginePreedit: String) -> String {
         if layoutMode == .nineGrid, page == .letters, let t9, t9.isActive {
@@ -303,7 +375,7 @@ final class KeyboardViewController: UIInputViewController {
             if !t9.unsegmentedTail.isEmpty {
                 segText += (segText.isEmpty ? "" : " ") + t9.unsegmentedTail
             }
-            return segText.isEmpty ? t9.digits : "\(segText)（\(t9.digits)）"
+            return segText.isEmpty ? t9.digits : segText
         }
         return enginePreedit
     }
@@ -325,10 +397,12 @@ final class KeyboardViewController: UIInputViewController {
 
     // MARK: 候选点选（全量下标 → 翻页 + 页内下标）
 
-    private func selectGlobalCandidate(_ globalIndex: Int) {
+    /// displayedCount 为点选来源视图当前展示的列表长度（候选改有界切片
+    /// 后全量总数不再每键可得，下标以来源列表为界校验，实现轮 4）。
+    /// 翻页 + 页内下标的换算逻辑不动（页大小用引擎报告值，轮 3 已修）。
+    private func selectGlobalCandidate(_ globalIndex: Int, displayedCount: Int) {
         guard engine.isReady else { return }
-        let total = engine.allCandidates().count
-        guard globalIndex >= 0, globalIndex < total else { return }
+        guard globalIndex >= 0, globalIndex < displayedCount else { return }
         let menu = engine.menu
         // 页大小必须用引擎报告的 menu.pageSize——v0.2 曾误用恒为空的
         // menu.candidates.count（=0→页大小 1），点第 i 个候选会翻到第 i 页
@@ -348,7 +422,6 @@ final class KeyboardViewController: UIInputViewController {
 
     private func setCandidatesExpanded(_ expanded: Bool) {
         candidatesExpanded = expanded
-        heightConstraint?.constant = candidateBarHeight + (expanded ? expandedListHeight : keyboardHeight)
         applyVisibility()
         if expanded { refresh() }
     }
@@ -365,6 +438,7 @@ final class KeyboardViewController: UIInputViewController {
         guard hasComposition else { return }
         engine.commitCurrentComposition()
         if let commit = engine.drainCommitText() {
+            lastEditWasCommit = true
             proxyInsert(commit)
         }
         if layoutMode == .nineGrid {
@@ -412,11 +486,15 @@ final class KeyboardViewController: UIInputViewController {
             // 苹果行为：回车先把组合串以高亮候选上屏，而不是透传原始拼音。
             engine.commitCurrentComposition()
             if let commit = engine.drainCommitText() {
+                lastEditWasCommit = true
                 proxyInsert(commit)
             } else if hasComposition {
                 // 兜底：commitComposition 未产生提交时退回引擎回车键语义。
                 engine.processKey(code: RimeKey.return, modifiers: 0)
-                if let commit = engine.drainCommitText() { proxyInsert(commit) }
+                if let commit = engine.drainCommitText() {
+                    lastEditWasCommit = true
+                    proxyInsert(commit)
+                }
             }
             refresh()
         } else {
@@ -565,6 +643,7 @@ final class KeyboardViewController: UIInputViewController {
         case .toggleAscii:
             toggleAsciiMode()
         case .switchToSymbols:
+            symbolKeyboard.showSymbolTab()
             page = .symbols
             applyVisibility()
         case .switchToNineGrid:
@@ -593,8 +672,26 @@ final class KeyboardViewController: UIInputViewController {
         case .digit(let d):
             handleT9Digit(d)
         case .symbolsPage:
+            symbolKeyboard.showSymbolTab()
             page = .symbols
             applyVisibility()
+        case .symbolsEmojiPage:
+            symbolKeyboard.showEmojiTab()
+            page = .symbols
+            applyVisibility()
+        case .punctuation:
+            // 点按插「，」：与符号页同一语义（先提交组合串再直插）；
+            // handleNineGridAction 入口已播按键音，不再走 handleSymbol 防双响。
+            commitCompositionIfAny()
+            proxyInsert("，")
+            refresh()
+        case .separator:
+            // 分隔：数字串活跃时打分词断点；不活跃时无操作（按键音照常）。
+            if let t9 = ensureT9(), t9.isActive {
+                t9.insertSeparator()
+                syncT9Feed()
+                refresh()
+            }
         case .backspace:
             handleBackspace()
         case .spaceOrCommit:
@@ -603,6 +700,10 @@ final class KeyboardViewController: UIInputViewController {
             handleEnter()
         case .toggleAscii:
             toggleAsciiMode()
+        case .toggleSyllables:
+            // 选拼音：当前组合期间手动开/关音节选项行（组合清空时自动复位）。
+            syllableRowUserHidden.toggle()
+            refresh()
         case .switchToFull26:
             switchLayoutMode(.full26)
         case .nextKeyboard:
@@ -712,6 +813,8 @@ final class KeyboardViewController: UIInputViewController {
     private func restoreLayoutMode() {
         let saved = SettingsBridge.defaults.string(forKey: SettingsKey.defaultLayout)
         layoutMode = (saved == "nineGrid") ? .nineGrid : .full26
+        // 面板高随布局不同（九宫格 250 / 26 键 236），恢复后立即对齐。
+        updateHeight()
     }
 
     private func switchLayoutMode(_ mode: LayoutMode) {
@@ -755,7 +858,9 @@ final class KeyboardViewController: UIInputViewController {
         fullKeyboard.setReturnKeyAccent(accent)
         symbolKeyboard.setReturnKeyTitle(title)
         symbolKeyboard.setReturnKeyAccent(accent)
-        nineGrid.setReturnKeyTitle(title)
+        // 九宫格的确认键：默认情境文案用「确认」（苹果九宫格同款），
+        // 其余情境（搜索/发送/前往…）与强调色同 26 键。
+        nineGrid.setReturnKeyTitle(title == "回车" ? "确认" : title)
         nineGrid.setReturnKeyAccent(accent)
     }
 }
