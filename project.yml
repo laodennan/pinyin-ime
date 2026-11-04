@@ -46,6 +46,10 @@ targets:
         excludes:
           - "SharedData"
           - "SharedData/**"
+      # 设置共享桥与主 App 共用同一份实现（实现轮 1 加入）：键盘侧需要读写
+      # SettingsKey.defaultLayout 等键。单文件双 target 是 XcodeGen 标准做法，
+      # 不改变 target 划分；两边各自编译一份，键名与 suite 探测逻辑不会漂移。
+      - App/SettingsBridge.swift
     info:
       path: Keyboard/Info.plist
       properties:

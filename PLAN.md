@@ -252,3 +252,121 @@ pinyin-ime/
 - librime 官方：<https://github.com/rime/librime>（`.gitmodules` deps 清单、Releases 的 macOS 包与 1.16.1/1.17.0 版本资产）
 - 自编路线参考：<https://github.com/imfuxiao/boost-iosx>、<https://github.com/amorphobia/LibrimeKit>、<https://github.com/chenqinggang001/LibrimeKit-ios12>
 - 雾凇拼音：<https://github.com/iDvel/rime-ice>（`t9.schema.yaml` 文件头与 processors、`cn_dicts/` 文件体积、README 的 lua 依赖 FAQ 与九键脚注、LICENSE 为 GPL-3.0）
+
+---
+
+## 9. 实现轮 1（2026-11-04）：引擎真实现 + 26 键键盘 + 设置页
+
+> 本节为实现轮 1 的追记：API 路线以当轮实拉源码为据（LibrimeKit tag v0.1.0 的
+> Package.swift、Sources/Swift 全部文件、Sources/ObjC 的 lrk_api.h/.m 本地通读；
+> 另解压本地 Vendor 的 librime.xcframework.zip 核对头文件构成）。本轮代码
+> **未经编译验证**——CI 是唯一编译器，下述「预计炸点」即为此设。
+
+### 9.1 API 路线结论：用糖衣层 + API() 逃生口，不直桥 C API
+
+- **SPM 结构**（Package.swift 实证）：包名/product 均为 `LibrimeKit`；Swift target
+  `LibrimeKit`（Sources/Swift）依赖 ObjC target `RimeKitObjC`（Sources/ObjC，
+  LRK* 类型，头在 include/）；9 个 binaryTarget（remote zip+checksum）。
+  糖衣各文件带 `@_exported import RimeKitObjC`，故业务侧只写 `import LibrimeKit`。
+- **README 的用法示例是假的**：README 写的 `Rime.shared.startService(...)`、
+  `process(input:)` 在 v0.1.0 源码中不存在。实际入口是
+  `Rime.createTraits(sharedSupportDir:userDataDir:)` →
+  `Rime.shared.start(_:maintenance:fullCheck:)`（内部 setup→initialize→maintenance）。
+- **糖衣覆盖面**：start/createSession/isRunning、inputKey/inputKeyCode、
+  candidateList（走候选迭代器、返回跨页全量）、candidateListWithIndex、
+  selectCandidateOnCurrentPage、highlightCandidateOnCurrentPage、changePage、
+  context()/status() 快照、getInputKeys/cleanComposition/commitComposition/
+  getCommitText、isAsciiMode()/asciiMode(_:)、setSchema/currentSchema、
+  deploy 回调注册。协议所需操作全部有着落。
+- **两处下沉逃生口**（`Rime.shared.API()` → LRKAPI，糖衣未暴露）：
+  `simulateKeySequence(_:andSession:)` 实现协议的 setInput（先 cleanComposition
+  再整串送入；T9 喂入的只有字母与分词符 '，无 RimeSimulateKeySequence 的
+  `{...}` 特殊记法，语义安全）；`syncUserData()` 实现 stop 的 userdb 落盘。
+- **不走 C API 的理由**：librime.xcframework.zip 内确实带完整 rime_api.h，
+  但 zip 内**没有 module.modulemap**，且该 binaryTarget 在 SPM 里只是被
+  RimeKitObjC 链接依赖、不向消费方暴露头模块——上层 Swift 无从 import。
+  糖衣+逃生口是这条分发形态下的唯一正道，C 头仅作语义参照。
+- **实测纠正两条糖衣注释**（以 lrk_api.m 实现为准）：
+  ① `processKey(_:)` 的 ObjC 实现只取字符串首字节（ASCII 场景够用，
+  我们字母键一律走 inputKeyCode 的 keysym 路径，不用它）；
+  ② `candidateListWithIndex` 的 index 走 `RimeCandidateListFromIndex`，
+  是 0 起的全量下标，糖衣注释写的「1-based」与实现矛盾——本轮展开列表
+  直接用 candidateList() 全量，不依赖该函数。
+- **选词必须用 on-current-page 版**：lrk_api.h 注释实测记录，旧
+  `select_candidate` 在 rime_ice 上会被静默忽略；翻页必须用 `changePage`
+  （雾凇未绑定 XK_Page_Down 键位，发键码翻页同样无效）。两者本轮均已按此实现。
+- **会话创建时机**：lrk_api.m 的 createSession 带有 FIXME——部署完成前调用
+  可能崩溃。故启动顺序钉死为：后台线程跑 start（含 maintenance，同为
+  同步 join 语义）→ 回主线程 createSession → selectSchema(rime_ice)。
+- **stop 不 finalize**：糖衣 shutdown 注释明示 librime 进程级单例 finalize 后
+  同进程不可再 setup；stop 只做 syncUserData + 不销毁，随扩展进程回收自然结束。
+- **traits 字段有效面**：lrk_api.m 的 `rimeTraits:` 转换只拷贝
+  shared/user/distribution×3/appName/prebuilt/staging 八个字段；
+  LRKTraits 上的 modules/minLogLevel/logDir 设了也不生效（v0.1.0 实测），
+  本轮不设。appName 覆写为 `rime.pinyinime`（工厂默认 rime.moocat）。
+
+### 9.2 部署策略
+
+- sharedDataDir = appex bundle 内 `SharedData/`（CI 预编译 .bin 已在其中，
+  由 project.yml 的 postBuildScript 拷入）；userDataDir = 扩展沙盒
+  `Application Support/RimeUser/`（不用 App Group，理由同 4.2）。
+- maintenance 只在 userDataDir 无 `.pinyinime-deploy-v1.done` 标记时跑一次
+  （fullCheck=false）；跑完（无论个别 schema 成败）即写标记，避免每次调出
+  键盘都付出全量检查成本；SharedData 的 .bin 齐全时这轮维护应近乎瞬时。
+- UI 侧：部署完成前显示「正在准备词库…」，不喂任何按键，从根上避开
+  维护线程与输入线程并发访问 librime；onReady 回主线程后才建会话、亮键盘。
+
+### 9.3 本轮落地清单
+
+- `Keyboard/RimeBridge/RimeEngine.swift`：协议补 isReady/onReady/
+  allCandidates() 三项；`LibrimeKitRimeEngine` 全实现替换原
+  UnavailableRimeEngine 占位（已确认无其他文件引用该占位类）；新增 RimeKey
+  keysym 常量表。
+- `Keyboard/CandidateBar/CandidateBarView.swift`（新）：候选条（preedit +
+  横向滚动全量候选 + 高亮 + 展开按钮）与展开列表 CandidateListView（逐行
+  点选、含注释列、收起按钮）。
+- `Keyboard/Views/KeyButton.swift`（新）：按下变色（动态色、深浅适配）、
+  退格长按连删（0.45s 后 55ms 连发）、多点触控独立计时。
+- `Keyboard/Views/FullKeyboardView.swift`（新）：按 FullKeyboardLayout 模型
+  手工 frame 布局（权重分宽）；地球键以 target/action 直挂
+  handleInputModeList（.allTouchEvents）；shift/ascii/回车文案状态外观。
+- `Keyboard/Layout/SymbolLayout.swift`（新）+ `Views/SymbolKeyboardView.swift`（新）：
+  数字行 + 中文标点两行 + 补充行；点击语义为「先提交组合串，再直插字面量」
+  （全角标点无 keysym 可透传，见文件注释）。
+- `Keyboard/KeyboardViewController.swift`：全量重写——引擎装配/启动、
+  refresh 统一回收上屏文本、候选全量下标↔（翻页+页内下标）换算、
+  空格选高亮/回车透传/退格分流（组合内走引擎、否则删文档）、符号页切换、
+  展开列表高度切换、九宫格占位页与布局切换持久化（写 SettingsBridge）。
+- `project.yml`：PinyinKeyboard 的 sources 追加 `App/SettingsBridge.swift`
+  单文件（双 target 共用同一份设置桥实现；targets/SPM/Info 结构未动）。
+- `App/ContentView.swift`：启用教程四步、默认布局 Picker（写
+  SettingsBridge）、同步状态明示（本地模式下注明键盘设置优先）、关于页
+  （版本/引擎/词库 + 许可证：librime 与 LibrimeKit 均为 **BSD-3-Clause**
+  ——注意不是 LGPL；雾凇 GPL-3.0；Boost BSL-1.0；leveldb BSD-3；
+  marisa-trie BSD-2/LGPL-2.1 双许可；OpenCC Apache-2.0；yaml-cpp MIT）。
+
+### 9.4 已知风险（按可能炸的顺序）
+
+1. **SPM 链接面**：`import LibrimeKit` 后 LRK* 类型的可见性依赖糖衣的
+   `@_exported import`，常规成立；若个别符号（如 LRKTraits 属性）不可见，
+   备选是在扩展内加一行 `import RimeKitObjC`（product 内 target 可直引）。
+2. **handleInputModeList 的 #selector 解析**：`#selector(handleInputModeList(from:with:))`
+   是苹果文档的标准写法，但若当前 SDK 的 Swift 名称有出入会直接编译失败——
+   这是本轮最可能的单点编译错误，失败则改用 advanceToNextInputMode() 兜底。
+3. **ObjC 无 nullability 头的类型推断**：LRKContext/LRKMenu/LRKCandidate 的
+   属性在 Swift 侧为 IUO，本轮已按可空防御性写（`?.`/`??`）；若某个属性被
+   推断为非可选，`??` 会报警告甚至错误，按报错逐个收紧即可。
+4. **高度约束**：view.heightAnchor 常量约束（优先级 999）是社区惯用做法；
+   若与系统 inputView 的固有高度冲突，可能出现约束警告或键盘高度不符——
+   真机验收时重点看（展开列表 308+44 是否被系统截断）。
+5. **首次维护耗时与标记语义**：若 CI 预编译 .bin 与运行时版本细节不兼容，
+   首次 maintenance 仍可能全量重编（慢但可用）；标记在维护后即写，
+   个别 schema 失败不会重试出词问题——失败会以「不出候选」暴露，下一轮
+   可加诊断页读取部署日志定位。
+6. **高亮全量下标换算**：页起始下标由「末页倒推 / 页号×本页数」推得，
+   页大小靠 cachedPageSize 缓存自引擎满页；若雾凇在某种模式下页大小可变
+   （如联想页），高亮位置与翻页目标可能偏一页——真机重点验翻到第 2 页点选。
+7. **进程内重启**：扩展进程被系统回收后是新进程，setup 重新走全流程
+   （标记在盘上，不重跑部署）；同进程内 stop→start 不被支持也不需要。
+8. **内容 EdgeInsets 等旧 API**：UIButton.contentEdgeInsets 在新 SDK 为
+   弃用警告（不阻断编译）；本轮为保 iOS 16 兼容未用 UIButton.Configuration。
