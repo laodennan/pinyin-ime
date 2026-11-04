@@ -580,3 +580,34 @@ setInput 校正引擎侧。风险：个别候选的部分上屏若在音节中�
    （设计如此，避免在错误键上开变体条）。
 6. **键盘总高 276**（40+236）比轮 1 的 260 更高：个别横屏/小屏宿主
    可能压缩内容区，真机重点看横屏与展开列表（348）是否被系统截断。
+
+## 实现轮 3（v0.2.1，2026-11-04 晚）：选字错位 + 九宫格切换闪退修复
+
+用户真机反馈（录屏为证）：① 打 nihao 点候选选错（「霓蚝」）；② 点「九宫格」跳回系统默认键盘。
+
+- **选字错位根因（实锤）**：LibrimeKit 的 `getContext` 出于性能不拷贝 menu.candidates（lrk_api.m 注释明示），桥接层 `menu.candidates` 恒为空数组；VC 旧逻辑用「满页 candidates.count」推缓存页大小，恒为 0 → 页大小=1 → 点全量下标 i 就翻到第 i 页选其第一个。下标 0 与空格不受影响，故 v0.1 用 nihao 点首选验收时没暴露。修复：RimeMenu 新增 pageSize/currentPageCandidateCount（取 LRKMenu.pageSize/numCandidates 引擎报告值），VC 的 pageStartIndex/selectGlobalCandidate 改用之，删除 cachedPageSize。
+- **九宫格闪退根因（实锤）**：syllables.txt 头部中文注释被按空格切词后混入音节表，T9Mapper.init 对汉字强解包 letterToDigit[$0]! 崩溃；崩溃点正好在首次点「九宫格」懒加载时，扩展进程死亡 → 系统顶上默认键盘。修复：加载改整行剔除 # 注释 + 只收纯小写字母词；init 内条目校验跳过非法音节（不再强解包）；segmentAll 加空串守卫；注释改英文。
+- 交付：第 41 号构建 1m54s 成功，Release `v0.2.1-test` 自动发布；亲验：IPA 30,748,417 字节、版本 0.2.1 (3)（主 App 与扩展一致）、SharedData 75 MB、17 个 .bin、cn_dicts 无 tencent、包内 syllables.txt 为新版。本地副本已更新；下载链接经 Gmail 发出（消息 ID 1a1a6976d486aa54），聊天内亦附 IPA。
+- 待用户复测：点后面的候选是否对位、九宫格能否停留并按 64 出 ni、旧问题软件调出情况。
+
+## 实现轮 4（v0.3.0，2026-11-04 晚）：九宫格照苹果原生布局重做 + 卡顿优化
+
+用户反馈（4 张截图，首张为苹果原生简体拼音九宫格作参照）：后三张（我方九宫格×2、26 键）UI 改成和 iOS 一样；且打字卡顿很严重。
+
+- **九宫格新布局（苹果式 5 列 × 4 行、整宽、无左条无右列）**：
+  R1 [123→符号页][，。？！→标点键][ABC=2][DEF=3][⌫]；R2 [#@¥→符号页][GHI=4][JKL=5][MNO=6][分隔]；
+  R3 [中英（中文态标 ABC/英文态标 拼音）][PQRS=7][TUV=8][WXYZ=9][确认（跨 R3–R4）]；
+  R4 [😊→符号页表情页签][选拼音→开关音节行][选定（跨 2 列）=空格/选词]。
+  字母键只标字母组、无数字无副标；标点键点按插「，」、长按变体 ，。？！、；：；分隔键接 T9 分词（无串时空转）；
+  中英键长按 = 切回 26 键（气泡提示），26 键侧仍有九宫格键可切回；确认键默认文案「确认」。
+- **音节选项**：从左侧竖条搬进候选栏顶部横行（chips，点选 pin），T9 组合中自动出现，选拼音键可手动开关；
+  候选栏高随之 40→76 动态调整。T9 预编辑去掉「（全部数字串）」尾巴，只留切分＋未切分尾巴数字。
+- **符号页加表情页签**：顶部 符号/表情 切换，表情网格约 36 个常用 emoji 点按直插。
+- **卡顿优化**：①桥接加 candidatesSlice(from:count:)（LRK getCandidate 有界迭代）——候选栏只取前 48、展开列表取前 360，不再每键全量迭代 allCandidates()；②桥接加 snapshot() 单次 RimeGetContext 取 composition+menu；③候选栏按钮池复用、preedit 不变不重置滚动偏移；④noteSelfEdit 仅在有组合串或刚发生上屏提交时才读 documentContextBeforeInput（省每键一次宿主 IPC）；⑤KeyButton 圆角 5→8 全局靠拢苹果。
+- 26 键布局不变（观感随圆角与候选栏优化受益）。版本 0.3.0 (4)，Release tag v0.3.0-test。
+
+### 实现轮 4 落地追记（实际改动与偏差）
+
+- **改动文件**：`RimeBridge/RimeEngine.swift`（协议 additive 加 snapshot()/candidatesSlice()，composition/menu/snapshot 共用 makeComposition/makeMenu 单份 context 构造；distributionVersion 0.3.0）、`RimeBridge/RimeModels.swift`（注释更新）、`Layout/NineGridLayout.swift`（grid/sideColumn 模型废弃，改 placements：5 列×4 行 + rowSpan/colSpan；NineGridKeyAction 新增 symbolsEmojiPage/punctuation/separator/toggleSyllables 四个 case）、`Views/NineGridView.swift`（整体重写：删左条/右列/updateSyllableStrip/onPinSyllables；字母键+标点键共用一个 PopupKeyTracker，hitTest 含标点键自身；标点长按变体经新增 onVariantInput 回调；中英键 defersActionToRelease+firesActionOnReleaseLocally、长按 0.38s 发 .switchToFull26 并 suppress 本次点按、presenter 气泡示「26键」；选定键保留触控板长按；地球键改网格下方 44pt 行居左、宽 56）、`CandidateBar/CandidateBarView.swift`（新增顶部音节行：setSyllableRow(entries:visible:)+onPinSyllables，内容未变跳过重建，syllableRowVisible 供 VC 定高；候选按钮与 chips 全池化；preedit 未变不重置滚动偏移；展开箭头与列表「收起」按钮 setTitleColor(.label) 去系统蓝）、`Layout/SymbolLayout.swift`（新增 emojiGrid 36 个）、`Views/SymbolKeyboardView.swift`（顶部 34pt 页签行 符号/表情，内容区下移、行高按 5 行重算；表情 9×4 网格；底部行两页签共用；showEmojiTab()/showSymbolTab() 供 VC 按入口切换）、`Views/KeyButton.swift`（cornerRadius 5→8）、`KeyboardViewController.swift`（refresh/updateCandidateUI 改 snapshot()+candidatesSlice(48/360)；点选总数改来源视图展示长度 barDisplayedCount/expandedDisplayedCount，两入口闭包分开包；音节行可见性判定与 syllableRowUserHidden 复位在 updateCandidateUI 内；高度统一 updateHeight()：栏 40/76 + 面板 236/250/308，applyVisibility 末尾与 restoreLayoutMode 后调用；displayPreedit 去「（数字串）」；noteSelfEdit 仅在 hasComposition 或 lastEditWasCommit 时读 documentContextBeforeInput，标记由 refresh/commitCompositionIfAny/handleEnter 三处 drain 点置位、noteSelfEdit 消费；updateReturnKeyTitle 对九宫格默认文案映射「确认」；新 action 语义：punctuation 直插「，」（不走 handleSymbol 防按键音双响）、separator 仅活跃时 insertSeparator、symbolsEmojiPage/symbolsPage/switchToSymbols 入口分别定符号页页签）、`project.yml`（0.3.0/4，仅 settings 基底两值，info 属性为变量引用自动跟随）、`.github/workflows/build-ipa.yml`（Release tag v0.3.0-test、标题与 notes 更新）。
+- **与规格的偏差**：①高亮全量下标的 totalCount 改以切片长度为已知下限——切片未取满时为精确总数，取满（总数>48）且当前页为末页时起始下标为近似值，仅影响高亮底色渲染位置，不影响点选换算（点选只用页大小/页号）；②中英键长按的气泡提示与切 26 键在同一手势内先后发生，面板随即切换，气泡实际可能一闪而过（规格允许随意实现）；③Tests/ 仅 T9MapperTests 且只引用 T9Mapper，本轮未动其与 T9Session 的公开 API，测试目标无需同步修改。
+- **遗留风险**：①本轮代码未经编译验证（CI 是唯一编译器），重点盯 NineGridView 的 tracker.textForKey 弱引用闭包与 SymbolKeyboardView 页签接线两处新写法；②候选栏切片上限 48 意味着横滑最多看 48 条，更多候选走展开列表（360）——与旧版全量横滑的行为差异，真机确认可接受度；③九宫格面板高 250 含地球行时网格行高约 44pt（无地球行约 55pt），手感差异待真机评；④符号页加页签行后单行高由约 47 降至约 41，点按面积变小，待真机评。
