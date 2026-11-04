@@ -22,6 +22,10 @@ jobs:
     # XcodeGen 2.44 生成的新版工程格式（objectVersion 77），Archive 步直接报
     # "future Xcode project file format"。下面 Select Xcode 16 一步再兜底显式选 16.x。
     runs-on: macos-15
+    # 发布 Release 需要 contents 写权限（把 IPA 挂到 Release 供手机直下载，
+    # 免去浏览器下载产物再上传的往返——2026-11-04 第 35 号产物浏览器下载多次失败的教训）。
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,3 +106,16 @@ jobs:
         with:
           name: PinyinIME-unsigned-ipa
           path: PinyinIME-unsigned.ipa
+
+      - name: Publish IPA to GitHub Release (phone-downloadable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.2.0-test >/dev/null 2>&1; then
+            gh release upload v0.2.0-test PinyinIME-unsigned.ipa --clobber
+          else
+            gh release create v0.2.0-test \
+              --title "拼音输入法 v0.2 内测版" \
+              --notes "第二轮：苹果风格 UI 与交互对齐、九宫格真界面、词库瘦身（砍 tencent 大词库）与首屏不阻塞修复。未签名 IPA，需自签后安装。" \
+              PinyinIME-unsigned.ipa
+          fi
