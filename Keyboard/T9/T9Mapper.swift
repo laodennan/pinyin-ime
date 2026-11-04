@@ -30,16 +30,23 @@ public final class T9Mapper {
     private let digitPrefixes: Set<String>
 
     public init(syllables: [String]) {
-        self.syllables = syllables
         var toDigits: [String: String] = [:]
         var toSyllables: [String: [String]] = [:]
         var prefixes = Set<String>()
+        var valid: [String] = []
         for syllable in syllables {
-            let code = syllable.map { Self.letterToDigit[$0]! }.map(String.init).joined()
+            // 防御：含 a–z 以外字符的条目（误入的注释文字、空串等）整条跳过，
+            // 绝不强解包——v0.2 曾因 syllables.txt 的中文注释词被当音节、
+            // 在 letterToDigit[$0]! 处崩溃，点九宫格切换即闪退回系统键盘。
+            let codeChars = syllable.map { Self.letterToDigit[$0] }
+            guard !syllable.isEmpty, codeChars.allSatisfy({ $0 != nil }) else { continue }
+            let code = codeChars.compactMap { $0 }.map(String.init).joined()
+            valid.append(syllable)
             toDigits[syllable] = code
             toSyllables[code, default: []].append(syllable)
             for i in 1...code.count { prefixes.insert(String(code.prefix(i))) }
         }
+        self.syllables = valid
         self.syllableToDigits = toDigits
         self.digitsToSyllables = toSyllables
         self.digitPrefixes = prefixes
@@ -47,14 +54,18 @@ public final class T9Mapper {
 
     /// 从打包资源 syllables.txt 加载（空格/换行分隔）。
     /// 资源可能被打进 appex 根目录，也可能保留 T9/ 子目录层级，两种都试。
+    /// 注释按**整行**剔除（行首为 # 的行），再逐词校验只留纯小写字母词。
     public convenience init?(bundle: Bundle = .main, resource: String = "syllables") {
         let url = bundle.url(forResource: resource, withExtension: "txt")
             ?? bundle.url(forResource: resource, withExtension: "txt", subdirectory: "T9")
         guard let url,
               let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let list = raw.split { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "\r" }
-            .map(String.init)
-            .filter { !$0.hasPrefix("#") }
+        let list = raw.split(separator: "\n").flatMap { line -> [String] in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("#") else { return [] }
+            return trimmed.split { $0 == " " || $0 == "\t" || $0 == "\r" }.map(String.init)
+        }.filter { !$0.isEmpty && $0.allSatisfy { ("a"..."z").contains($0) } }
+        guard !list.isEmpty else { return nil }
         self.init(syllables: list)
     }
 
@@ -74,6 +85,7 @@ public final class T9Mapper {
     /// 返回前 limit 个候选切分（按音节数升序），供音节条/调试使用。
     public func segmentAll(digits: String, pinned: [String] = [], limit: Int = 8) -> [[String]] {
         let chars = Array(digits)
+        guard !chars.isEmpty else { return [] }
         let pinnedDigits = pinned.compactMap { syllableToDigits[$0] }.joined()
         guard digits.hasPrefix(pinnedDigits) else { return [] }
 

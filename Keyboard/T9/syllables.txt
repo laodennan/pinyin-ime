@@ -1,7 +1,7 @@
-# 标准拼音音节清单（无声调），一行一个。
-# T9Mapper 在启动时由本清单程序化生成「数字串 → 音节」映射与 Trie，
-# 生成方法与 Hamster 的 T9Test 一致（见 PLAN.md 3.2）；增删音节只改本文件。
-# ü 系列以 v 记（lv、nve 等），与 Rime 雾凇拼音的拼写保持一致。
+# Standard pinyin syllable list (no tones). One line per initial group.
+# T9Mapper builds the digit->syllable map from this file at runtime.
+# Comment lines must start with # (whole line is dropped by the loader).
+# The u-umlaut series is written with v (lv, nve), matching rime-ice spelling.
 a ai an ang ao
 ba bai ban bang bao bei ben beng bi bian biao bie bin bing bo bu
 ca cai can cang cao ce cen ceng cha chai chan chang chao che chen cheng chi chong chou chu chua chuai chuan chuang chui chun chuo ci cong cou cu cuan cui cun cuo
