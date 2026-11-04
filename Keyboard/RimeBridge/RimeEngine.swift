@@ -63,7 +63,16 @@ public protocol RimeEngine: AnyObject {
     var composition: RimeComposition { get }
     /// 当前页候选菜单（分页元数据 + 本页候选）。
     var menu: RimeMenu { get }
-    /// 全部候选（跨页，候选展开列表用）。内部走候选迭代器，量级数百以内可接受。
+    /// 一次 context 读取同时产出 composition 与 menu（实现轮 4 卡顿优化：
+    /// composition / menu 两属性各调一次 RimeGetContext，每键两次全量
+    /// 快照是浪费；refresh 路径改走本方法只取一次）。
+    func snapshot() -> (composition: RimeComposition, menu: RimeMenu)
+    /// 有界取候选：返回全量下标 [from, from+count) 的切片（实现轮 4 新增）。
+    /// 候选栏每键只取前若干条，不再全量迭代（见 allCandidates 的说明）。
+    func candidatesSlice(from: Int, count: Int) -> [RimeCandidate]
+    /// 全部候选（跨页）。内部走候选迭代器全量枚举，量级可达数百，
+    /// **不要在每键路径调用**（实现轮 4 起仅保留定义，UI 已改用
+    /// candidatesSlice 有界取）。
     func allCandidates() -> [RimeCandidate]
     /// 已提交待取走的文本（上屏文本由 UI 侧在状态变化后 drain）。
     func drainCommitText() -> String?
@@ -130,7 +139,7 @@ public final class LibrimeKitRimeEngine: RimeEngine {
         )
         traits.distributionName = "拼音输入法"
         traits.distributionCodeName = "PinyinIME"
-        traits.distributionVersion = "0.2.1"
+        traits.distributionVersion = "0.3.0"
         // 形如 "rime.<x>"，前缀让 librime 识别为自家日志命名（工厂默认 rime.moocat）。
         traits.appName = "rime.pinyinime"
 
@@ -221,13 +230,29 @@ public final class LibrimeKitRimeEngine: RimeEngine {
 
     public var composition: RimeComposition {
         guard isReady else { return .empty }
-        let ctx = Rime.shared.context()
-        let preedit = ctx.composition?.preedit ?? ""
-        return RimeComposition(input: Rime.shared.getInputKeys(), preedit: preedit)
+        return Self.makeComposition(ctx: Rime.shared.context(),
+                                    input: Rime.shared.getInputKeys())
     }
 
     public var menu: RimeMenu {
-        guard isReady, let lrkMenu = Rime.shared.context().menu else { return .empty }
+        guard isReady else { return .empty }
+        return Self.makeMenu(ctx: Rime.shared.context())
+    }
+
+    public func snapshot() -> (composition: RimeComposition, menu: RimeMenu) {
+        guard isReady else { return (.empty, .empty) }
+        // 单次 RimeGetContext（糖衣 context()）同时喂 composition 与 menu。
+        let ctx = Rime.shared.context()
+        return (Self.makeComposition(ctx: ctx, input: Rime.shared.getInputKeys()),
+                Self.makeMenu(ctx: ctx))
+    }
+
+    private static func makeComposition(ctx: LRKContext, input: String) -> RimeComposition {
+        RimeComposition(input: input, preedit: ctx.composition?.preedit ?? "")
+    }
+
+    private static func makeMenu(ctx: LRKContext) -> RimeMenu {
+        guard let lrkMenu = ctx.menu else { return .empty }
         // LRKMenu.candidates 恒为空（LibrimeKit 不拷贝，见 RimeModels 注释）；
         // 分页换算改用引擎报告的 pageSize 与 numCandidates（当前页候选数）。
         let pageSize = max(Int(lrkMenu.pageSize), 1)
@@ -241,6 +266,14 @@ public final class LibrimeKitRimeEngine: RimeEngine {
             currentPageCandidateCount: pageCount,
             highlightedIndex: (highlighted >= 0 && highlighted < pageCount) ? highlighted : nil
         )
+    }
+
+    public func candidatesSlice(from: Int, count: Int) -> [RimeCandidate] {
+        guard isReady, from >= 0, count > 0 else { return [] }
+        // 糖衣 getCandidate(index:count:) → ObjC getCandidateWithIndex：
+        // 以 RimeCandidateListFromIndex 定位、iterator.index（0 起全量下标）
+        // 为界收集 [from, from+count)，迭代量与 count 成正比而非总量。
+        return Self.mapCandidates(Rime.shared.getCandidate(index: from, count: count))
     }
 
     public func allCandidates() -> [RimeCandidate] {

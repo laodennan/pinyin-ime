@@ -30,7 +30,7 @@ public struct RimeComposition: Equatable {
 public struct RimeMenu: Equatable {
     /// 当前页候选。注意：LibrimeKit 的 getContext 出于性能**不拷贝** menu 的
     /// 候选数组（lrk_api.m 注释明示），桥接层拿到的恒为空——UI 显示用的
-    /// 全量候选走 allCandidates()，分页换算只用下面三个引擎报告值，
+    /// 候选走 candidatesSlice() 有界切片，分页换算只用下面三个引擎报告值，
     /// 绝不要拿 candidates.count 当页大小（v0.2 选字错位的根因）。
     public let candidates: [RimeCandidate]
     public let pageNumber: Int
