@@ -19,7 +19,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$ROOT/Keyboard/SharedData"
 DEPS="$ROOT/.deps/librime-$LIBRIME_VERSION"
 
-if [[ ! -x "$DEPS/bin/rime_deployer" ]]; then
+# 注意真实包内布局（2026-11-04 在本机解包核实，勿再猜）：
+# - rime 包整体在 dist/ 下：部署器 dist/bin/rime_deployer，库 dist/lib/（含 rime-plugins/）。
+# - deps 包为顶层 bin/、include/、lib/（leveldb/yaml-cpp/marisa/glog/opencc 等）。
+# 第 12 号 CI 运行即死在旧脚本按 $DEPS/bin/rime_deployer 找部署器的错误路径上。
+if [[ ! -x "$DEPS/dist/bin/rime_deployer" ]]; then
   mkdir -p "$DEPS"
   base="https://github.com/rime/librime/releases/download/$LIBRIME_VERSION"
   curl -fsSL -o "$DEPS/rime.tar.bz2" "$base/$LIBRIME_ASSET_RIME"
@@ -28,8 +32,12 @@ if [[ ! -x "$DEPS/bin/rime_deployer" ]]; then
   tar -xjf "$DEPS/rime-deps.tar.bz2" -C "$DEPS"
 fi
 
-export DYLD_FALLBACK_LIBRARY_PATH="$DEPS/dist/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-"$DEPS/bin/rime_deployer" --build "$DATA"
+echo "== deployer =="
+ls -la "$DEPS/dist/bin/rime_deployer"
+
+export DYLD_LIBRARY_PATH="$DEPS/dist/lib:$DEPS/lib:${DYLD_LIBRARY_PATH:-}"
+export DYLD_FALLBACK_LIBRARY_PATH="$DEPS/dist/lib:$DEPS/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+"$DEPS/dist/bin/rime_deployer" --build "$DATA"
 
 echo "== precompiled bins =="
 ls -la "$DATA/build/"
