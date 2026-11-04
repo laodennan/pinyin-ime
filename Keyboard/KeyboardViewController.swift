@@ -46,8 +46,6 @@ final class KeyboardViewController: UIInputViewController {
     private var candidatesExpanded = false
     private var shiftState: ShiftState = .off
     private var lastShiftTapTime: TimeInterval = 0
-    /// 引擎每页候选数：从引擎返回的满页推得并缓存（展开点选换算页码用）。
-    private var cachedPageSize: Int?
 
     // T9 状态（懒构建，见类注释）。
     private var t9: T9Session?
@@ -287,9 +285,6 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updateCandidateUI() {
         let menu = engine.menu
-        if !menu.isLastPage, menu.candidates.count > 0 {
-            cachedPageSize = menu.candidates.count
-        }
         let all = engine.allCandidates()
         let highlighted = globalHighlightedIndex(menu: menu, totalCount: all.count)
         let preedit = displayPreedit(enginePreedit: engine.composition.preedit)
@@ -313,12 +308,14 @@ final class KeyboardViewController: UIInputViewController {
         return enginePreedit
     }
 
-    /// 当前页在全量候选中的起始下标：末页时由总数倒推，其余页由页号 × 页大小推。
+    /// 当前页在全量候选中的起始下标：末页时由总数倒推（用引擎报告的
+    /// 当前页候选数），其余页由页号 × 引擎报告的页大小推。
+    /// （v0.2 教训：menu.candidates 恒为空，拿它的 count 换算会全盘错位。）
     private func pageStartIndex(menu: RimeMenu, totalCount: Int) -> Int {
         if menu.isLastPage {
-            return max(totalCount - menu.candidates.count, 0)
+            return max(totalCount - menu.currentPageCandidateCount, 0)
         }
-        return menu.pageNumber * menu.candidates.count
+        return menu.pageNumber * menu.pageSize
     }
 
     private func globalHighlightedIndex(menu: RimeMenu, totalCount: Int) -> Int? {
@@ -333,7 +330,10 @@ final class KeyboardViewController: UIInputViewController {
         let total = engine.allCandidates().count
         guard globalIndex >= 0, globalIndex < total else { return }
         let menu = engine.menu
-        let pageSize = max(cachedPageSize ?? menu.candidates.count, 1)
+        // 页大小必须用引擎报告的 menu.pageSize——v0.2 曾误用恒为空的
+        // menu.candidates.count（=0→页大小 1），点第 i 个候选会翻到第 i 页
+        // 选其第一个，表现为「选字对不上」。
+        let pageSize = max(menu.pageSize, 1)
         let targetPage = globalIndex / pageSize
         var guardCounter = 0
         while engine.menu.pageNumber < targetPage, guardCounter < 32 {
