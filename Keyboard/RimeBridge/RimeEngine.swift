@@ -130,7 +130,7 @@ public final class LibrimeKitRimeEngine: RimeEngine {
         )
         traits.distributionName = "拼音输入法"
         traits.distributionCodeName = "PinyinIME"
-        traits.distributionVersion = "0.1.0"
+        traits.distributionVersion = "0.2.0"
         // 形如 "rime.<x>"，前缀让 librime 识别为自家日志命名（工厂默认 rime.moocat）。
         traits.appName = "rime.pinyinime"
 
