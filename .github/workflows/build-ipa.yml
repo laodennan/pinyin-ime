@@ -36,7 +36,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Keyboard/SharedData
-          key: rimedata-${{ env.RIME_ICE_COMMIT }}-librime-${{ env.LIBRIME_VERSION }}
+          # -slim1（2026-11-04，PLAN 9.6）：组装逻辑剔除 tencent 大词库后必须
+          # 换 key，否则旧缓存（122 MB 全量数据）命中后 fetch/预编译两步被跳过，
+          # 瘦身静默失效。组装逻辑再变时继续递增此后缀。
+          key: rimedata-${{ env.RIME_ICE_COMMIT }}-librime-${{ env.LIBRIME_VERSION }}-slim1
 
       - name: Fetch rime-ice and assemble SharedData
         if: steps.rimedata-cache.outputs.cache-hit != 'true'
