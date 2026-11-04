@@ -13,8 +13,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
 targets:
   PinyinIME:
     type: application
@@ -28,6 +28,10 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: 拼音输入法
+        # 显式写入版本号引用：实现轮 1 时生成的 plist 显示 1.0（XcodeGen
+        # 缺省模板未跟随 MARKETING_VERSION），双 target 都在此钉死。
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
     dependencies:
       - target: PinyinKeyboard
@@ -54,6 +58,8 @@ targets:
       path: Keyboard/Info.plist
       properties:
         CFBundleDisplayName: 拼音键盘
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.keyboard-service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController

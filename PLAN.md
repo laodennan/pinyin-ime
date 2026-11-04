@@ -370,3 +370,213 @@ pinyin-ime/
    （标记在盘上，不重跑部署）；同进程内 stop→start 不被支持也不需要。
 8. **内容 EdgeInsets 等旧 API**：UIButton.contentEdgeInsets 在新 SDK 为
    弃用警告（不阻断编译）；本轮为保 iOS 16 兼容未用 UIButton.Configuration。
+
+### 9.5 追加核对（2026-11-04 晚）：启动不阻塞——首屏路径逐行核查与一处修订
+
+背景：用户真机反馈「别的 App 里有时调不出键盘、地球键列表里也找不到」，
+症状发生在普通聊天框（已排除密码框的系统强制切换）。两个候选杀手：
+内存超限被杀（另有词库瘦身修订对应）与**首屏超时被系统判死**——本节处理
+后者：要求 viewDidLoad / viewWillAppear 首屏路径零阻塞，引擎未就绪时先画
+键盘骨架、候选栏留空，就绪回调后再刷新。
+
+**逐行核对结论（KeyboardViewController + LibrimeKitRimeEngine.start）**：
+
+- `viewDidLoad`：动态色背景、`isMultipleTouchEnabled` 均为廉价 UIKit 设置；
+  `buildSubviews()` 是纯 UI 构建（候选栏、展开列表的 UITableView、26 键约
+  35 个 KeyButton、符号页约 44 个按钮——全是对象构造，无 I/O、无引擎调用）；
+  高度约束与 `applyVisibility()` 只读 `engine.isReady` 这个 Bool；
+  `restoreLayoutMode()` 只读 UserDefaults（含 SettingsBridge 的 App Group
+  探测 `containerURL(...)`，无 entitlement 时立即返回 nil，不阻塞）。
+- `startEngine()`（viewDidLoad 末尾、UI 构建之后才调用）：Bundle 资源 URL
+  查找 + 沙盒目录 URL 拼装 + `engine.start()`。后者在调用线程上只做
+  `createDirectory`（毫秒级文件操作）、`Rime.createTraits`（纯字段填充）、
+  部署标记 `fileExists` 检查；真正的重活 `Rime.shared.start`
+  （setup→initialize→maintenance，ObjC 层会同步 join 维护线程）整体在
+  `DispatchQueue.global` 上执行，**不在主线程**；`createSession` /
+  `setSchema` 更是推迟到维护完成后的主队列 block（轮 1 为避 createSession
+  的 FIXME 崩溃钉死的顺序，本次未动）。结论：调用线程零等引擎。
+- `viewWillAppear`：读 `needsInputModeSwitchKey`、`returnKeyType` 均为
+  系统侧廉价属性；`refresh()`（内含 drainCommit/menu/allCandidates 等
+  引擎读）以 `if engine.isReady` 守门——未就绪时一次引擎调用都不发生。
+- `viewDidLayoutSubviews` 纯 frame 计算；`textDidChange` 只更新回车键文案。
+- 按键侧：未就绪时 `handleKeyAction` / `handleSymbol` 均有
+  `guard engine.isReady` 而自然失效，骨架按键按了也只是空转，不会排队
+  等引擎。
+
+**发现的偏差与修订（一处）**：轮 1 的 `applyVisibility()` 在未就绪时把
+候选栏与全部按键视图统统隐藏，整屏只剩一句「正在准备词库…」。一旦首次
+部署变慢（CI 缓存未命中打出无预编译 .bin 的包、或将来方案变更触发全量
+重部署），用户就要对着空白屏等数秒——观感上正是「键盘调不出来」，且空白
+首屏更易被系统判定为无响应。已修订为：可见性只由布局/页/展开状态决定，
+未就绪时按键骨架立即渲染、候选栏保持初始空态，状态文案改为半透明遮罩
+浮于键区上方（不拦截触摸），`onReady` 时收起遮罩并 `refresh()` 填充。
+
+**记录在案、本次不动**：`didReceiveMemoryWarning` → `engine.stop()` →
+`syncUserData()` 是主线程同步引擎调用，但不在首屏路径上，且刻意保持
+同步——内存警告后进程随时可能被杀，异步同步有丢 userdb 的风险，同步
+落盘是更稳的选择。若日后 profiling 显示该路径卡顿再议。
+
+**给实现轮 2 的约束**：T9 接入时 `T9Mapper` 的初始化（读 syllables.txt +
+构建映射/前缀集）不得进 viewDidLoad 同步路径，须懒加载或后台构建；
+同理符号页若日后出现首屏卡顿证据，可改为首次切页时懒构建（当前三面板
+急切构建约 80 个按钮，未实测出卡顿，先不预优化）。
+
+### 9.6 追加修订（2026-11-04 晚）：词库瘦身——组装时下掉 tencent 大词库
+
+背景同 9.5：用户真机「有时调不出键盘、地球键列表里找不到」，主嫌疑是
+键盘扩展内存超限被系统杀。当前 SharedData 122 MB，其主词库
+`rime_ice.table.bin` 在加载/部署时的内存峰值与词条总量成正比——而
+tencent 词库一个文件就占了过半词条。这是 PLAN 2.1 早就备好的预案
+（「v1 先上 base+ext+8105，tencent 做成可选」），本节把它落到组装脚本。
+
+**锁定 commit（99662ba）实测数据**（本机克隆该 commit 逐项核对）：
+词条数——base 543,320、ext 339,209、tencent **981,574**、8105 8,757，
+合计约 187 万，tencent 独占约 **52%**；文件体积——tencent.dict.yaml
+16.5 MiB、base 15.8 MiB、ext 11.4 MiB，组装源数据总计约 49 MB，
+现 122 MB 中其余约 73 MB 为预编译 build/*.bin。
+全仓 grep 确认：功能性的 tencent 引用只有 `rime_ice.dict.yaml`
+import_tables 里一行；其余命中均为词库文件内注释、文档与组装时已排除
+的 `others/` 脚本，不影响导入。
+
+**改法（只改组装产物，不动上游文件本身）**：
+- `scripts/fetch-rime-ice.sh`：rsync 增加 `--exclude
+  'cn_dicts/tencent.dict.yaml'`；拷贝后对产物 `rime_ice.dict.yaml` 用
+  `grep -v 'cn_dicts/tencent'` 删掉那一行导入（用 grep 而非 sed -i，
+  避开 BSD/GNU 差异）；删后双重自检（导入行仍在或词库文件仍在 → 当场
+  失败退出，杜绝静默带大词库出包）。已在本机对锁定 commit 的真实文件
+  验证：77 行 → 76 行，恰好删此一行，8105/base/ext/others 导入完好。
+- `scripts/precompile-schemas.sh`：预编译前加同款不变量守卫（手工组装/
+  缓存串味把 tencent 带回来时直接失败），部署逻辑与启动顺序未动。
+- `.github/workflows/build-ipa.yml`：SharedData 缓存 key 追加 `-slim1`
+  后缀——**不换 key 的话旧的 122 MB 缓存命中后 fetch/预编译两步被跳过，
+  瘦身会静默失效**；今后组装逻辑再变继续递增后缀。
+- 顺手核查（任务书第 2 点）：`rime_ice.schema.yaml` 主翻译器只挂
+  rime_ice 词库，`default.yaml` 的 `menu/page_size: 5` 偏小且与内存无关，
+  schema_list 里双拼系列共用同一词库、其 .bin 以 prism 为主且运行时只
+  加载当前方案——没有发现明显抬高内存的配置项，本次不改配置。
+
+**预期体积**：确定项——源数据 −16.5 MiB（49 → 约 32.5 MB）；估算项——
+table.bin 按词条量近似同比缩小约一半，build/ 预计由约 73 MB 降到
+约 38–45 MB，SharedData 总量预计落到 **约 70–78 MB**（任务目标
+60–70 MB 的上沿附近，未必一步到位）。**以 CI 的「Report Rime data
+size」步实测为准**；若实测仍明显高于 70 MB，下一杠杆（另轮决策）是
+只打包 build/*.bin + schema 而不带源 dict.yaml——运行时只读 .bin，
+但设备端重部署将失去源文件，需与 9.2 的部署标记策略一并评估后再动。
+
+**覆盖影响（如实记录）**：tencent 是腾讯词向量整理的补充词库，无注音
+（靠引擎自动注音）、以两字词与长尾组合词为主。base 的文件头注释本身
+就说明 base 已从腾讯词向量等来源补充了大量常用两字词，故日常词汇靠
+base（54 万）+ ext（34 万）+ 8105 字表基本够用，整句造句的主干不受
+影响；可感知损失在长尾：生僻组合词、部分网络新词与专名可能不再整词
+出候选、需逐字或分段组词。换来的是词库内存峰值近乎减半——对「键盘
+被系统杀掉」这个存亡级症状，这笔交换成立；若日后内存实测宽裕，可把
+tencent 做成可选包再加回。
+
+---
+
+## 10. 实现轮 2（2026-11-04 晚）：苹果式 UI/交互 + 九宫格 + 版本号 0.2.0
+
+> 本节为实现轮 2 主体的追记（不含已单独完成的 9.5 启动不阻塞、9.6 词库
+> 瘦身）。用户要求：交互逻辑与 UI 向苹果自带键盘看齐、九宫格一并做出来。
+> **RimeEngine 协议签名未动**（仅 traits 的 distributionVersion 字面量随版
+> 本号改为 0.2.0）；本轮代码未经编译验证，CI 是唯一编译器。
+
+### 10.1 落地结构（新增/重写文件）
+
+- `Keyboard/Views/KeyPopupPresenter.swift`（新）：弹窗呈现层（放大镜气泡 /
+  变体条，几何与下标换算同源）+ `PopupKeyTracker`（面板级单触摸追踪：
+  按下弹窗、滑动跟随换键、抬起输入；双触摸接管先提交前一键；长按变体
+  接入后切换为变体选择）+ `SpaceTrackpadPhase` 回调枚举。
+- `Keyboard/Views/KeyButton.swift`（重写）：苹果配色常量（功能键浅色
+  #ACB4BE、深色字母键 #46464A、功能键 #2E2E30）；新增 isAccent（回车强
+  调蓝）/ isLatched（Shift 反白）状态；延迟触发模式（defersActionToRelease
+  + firesActionOnReleaseLocally + suppressNextReleaseAction）；触摸事件转发
+  `onTouchEvent`；连发 tick 带累计时长 `onRepeatTick`（delay 改 0.4s）；
+  键面副标 `keySubLabel`（九宫格字母组）。
+- `Keyboard/T9/T9Session.swift`（新）：T9 状态机——数字串 / pinned /
+  断点（分词键）/ DP 切分（覆盖位数优先、音节数最少；断点约束不跨越）/
+  stripOptions（单音节在前、整串切分在后）/ consumeSyllables /
+  loadFromPinyin（26 键切入时以字母反推数字保输入）。
+- `Keyboard/Views/NineGridView.swift`（新）：左侧音节条（竖列滚动 + 点选
+  锁定；地球键固定其底部）、主区 4×3、右侧列（回车占两行 / 26 键 / 符）；
+  数字键走 PopupKeyTracker（弹窗只显数字）；0 键兼空格（抬起触发 + 长按
+  触控板）。轮 1 的九宫格占位页至此删除。
+- `Keyboard/Layout/NineGridLayout.swift`（改）：grid 改 4 行（第四行
+  中/英、0 空格、退格），新增 sideColumn；1 键副标改「，。？！」。
+- `Keyboard/Views/FullKeyboardView.swift`（重写）：字母 22pt、功能中文
+  16pt、行距 10；字母键接弹窗追踪 + 长按变体识别器；空格延迟触发 +
+  长按触控板；退格 tick 转发；setShiftState / setReturnKeyAccent 新接口
+  （setCaps 废弃）。
+- `Keyboard/KeyboardViewController.swift`（重写）：高度改候选栏 40 +
+  键区 236（字母行约 51.5pt）；底色改浅 #D1D3D9 / 深 #242426；refresh()
+  统一双布局；T9 喂入/消费同步（见 10.3）；共享 handleSpace/handleEnter/
+  handleBackspace(heldFor:)/toggleAsciiMode；Shift 状态机；双击空格；
+  触控板；宿主变化自动提交；回车情境文案补强调色（三面板同步）。
+- `Keyboard/Views/SymbolKeyboardView.swift`（改）：回车强调接口、退格
+  tick 转发、底行字号 16、行距 10。
+- `Keyboard/CandidateBar/CandidateBarView.swift`（改）：候选字号 20、
+  预编辑 16。候选高亮底色**保留**（与苹果不同：它指示空格将提交谁，
+  是功能信息而非装饰，真机若觉吵下轮去掉）。
+- `Keyboard/T9/T9Mapper.swift`（小改）：资源加载加 T9/ 子目录兜底。
+- `project.yml`：MARKETING_VERSION 0.2.0 / CURRENT_PROJECT_VERSION 2，
+  且双 target 的 info 属性显式写 CFBundleShortVersionString /
+  CFBundleVersion 引用（轮 1 显示 1.0 的根因是 XcodeGen 缺省模板未跟随
+  构建设置，此为钉死修法，验包时核对生成的 plist 是否真为 0.2.0/2）。
+
+### 10.2 苹果式交互的取舍与改法
+
+- **字母输入时机**：苹果是抬起输入，本轮照此改（轮 1 为按下输入）——
+  弹窗跟随与抬起落键是同一套机制的两面。功能键（退格/回车/Shift 等）
+  保持按下触发（苹果亦然，退格连发依赖它）。
+- **长按变体分工**：元音出四声、v 出 ü 系列、第一行辅音出数字；
+  e/i/o/u 同时属第一行与元音，**声调优先**，其数字（3/7/8/9）只能走
+  符号页（q/w/r/t/y/p 的 1/2/4/5/6/0 可长按直达）。
+- **变体/符号的直插语义**：先提交组合串再直插字面量（与符号页同理），
+  因为声调字母与数字本就不是拼音会话的合法输入。
+- **触控板**：长按空格（26 键）/ 0 键（九宫格）激活，约 20pt 一格调
+  adjustTextPosition；激活先提交组合串；本次触摸的空格动作被抑制
+  （suppressNextReleaseAction），不会误上屏。
+- **双击空格**：只挂在无组合串的上屏路径（0.3s 窗口 + 光标前确为空格
+  才替换），有组合串时空格恒为选词，不误伤。
+- **宿主变化自动提交**：以「自家编辑后期望的光标前文本」+「选择回声
+  标记」双信号区分回声与宿主变化，尽力而为。已知边界：切到全新输入
+  框时无法区分「同文档移光标」与「换字段」，一律提交到当前 proxy
+  （保住用户输入优先）；自家部分上屏后若回声事件只来其一，标记会多
+  留一拍、吞掉紧随的一次真实选择变化（下一次即恢复）。真机重点验：
+  打一半拼音点到文本别处、切换 App 输入框两种场景。
+- **按键音**：轮 1 已有（playInputClick + UIInputViewAudioFeedback），
+  本轮保留未动，系统会在无完全访问时自动静音。
+
+### 10.3 T9 同步方法（偏离 PLAN 3.2 的一处）
+
+PLAN 3.2 设想用候选 comment 反推已消耗位数；实查 rime_ice 译文候选的
+comment 常为空或不稳定，本轮改用更硬的信号：**引擎输入字母差**——VC
+保存上次同步的切分（t9SyncedSegmentation），refresh 时比较引擎现输入
+与快照的字母数差，恰好对齐音节边界才 consumeSyllables；整体上屏
+（输入清空）时消耗全部已喂音节；对不齐则不动数字串、由 syncT9Feed 以
+setInput 校正引擎侧。风险：个别候选的部分上屏若在音节中间落刀（少见），
+该次同步会跳过，表现为数字串短暂多留一位，删一次即恢复。
+
+其余按 PLAN 3.2 原样：1 键双义（有数字串 = 分词断点、无串 = 符号页
+入口，与键面副标一致）；英文模式下九宫格数字直插（多击字母输入未做）；
+26↔9 切换以字母会话为中介（切入时 loadFromPinyin 反推数字，切回时
+引擎输入原样沿用）。
+
+### 10.4 已知风险 / 预计 CI 炸点
+
+1. **selectionDidChange 的 override 签名**：UIInputViewController 的
+   selectionDidChange(_:) 与 textDidChange 同族，签名写错会直接编译
+   失败（cannot override / near match 警告转错误的风险低，但列为首查）。
+2. **titleEdgeInsets / contentEdgeInsets 弃用**：新 SDK 为警告不阻断
+   （同轮 1 的 contentEdgeInsets 先例）；若 CI 开了 warnings-as-errors
+   才会炸——workflow 未设，原样应过。
+3. **syllables.txt 在 appex 中的实际位置**：XcodeGen 资源阶段是否把它
+   放在根目录或保留 T9/ 子目录未经真机验证；T9Mapper 已双路查找，
+   两路皆失时九宫格数字键静默无反应（ensureT9 返回 nil），真机一试便知。
+4. **弹窗追踪与 UIButton 内部高亮的竞争**：tracker 手动置 isHighlighted
+   与系统自管高亮可能在快速滑动时短暂不一致（纯视觉，无功能后果）。
+5. **长按识别器与弹窗追踪的时序**：变体在 0.38s 触发时若手指已滑出
+   原键，beginVariants 的 currentKey == button 守卫会使其静默不激活
+   （设计如此，避免在错误键上开变体条）。
+6. **键盘总高 276**（40+236）比轮 1 的 260 更高：个别横屏/小屏宿主
+   可能压缩内容区，真机重点看横屏与展开列表（348）是否被系统截断。
