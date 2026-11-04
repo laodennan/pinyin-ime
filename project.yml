@@ -39,8 +39,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mrzhao.pinyinime.keyboard
     sources:
-      # SharedData 必须从 sources 排除：它已由下方 resources 的文件夹引用整体打包，
-      # 若再被 sources 逐文件收进资源阶段，会与文件夹副本同路径相撞
+      # SharedData 必须从 sources 排除：它由下方 postBuildScripts 显式整目录拷贝进 appex；
+      # 若被 sources 逐文件收进资源阶段，会同路径相撞
       # （第 14 号运行的 13 条 "Multiple commands produce ...appex/*.schema.yaml" 即此）。
       - path: Keyboard
         excludes:
@@ -61,11 +61,24 @@ targets:
     dependencies:
       - package: LibrimeKit
         product: LibrimeKit
-    # Rime 数据由 CI 在 xcodegen 之前组装到 Keyboard/SharedData（见 workflow），
-    # 以文件夹引用整体打包进扩展；本地不存在该目录时不要在本机 generate。
-    resources:
-      - path: Keyboard/SharedData
-        type: folder
+    # Rime 数据由 CI 在 xcodegen 之前组装到 Keyboard/SharedData（见 workflow）。
+    # 教训（第 15 号运行验包）：resources 的文件夹引用没有把目录拷进 appex——
+    # 产出的 IPA 里扩展只有二进制、没有词库。改用显式构建后脚本拷贝，并加缺失即失败的守卫，
+    # 杜绝再静默打出无数据包。本地不存在该目录时不要在本机 generate。
+    postBuildScripts:
+      - name: Copy Rime SharedData into extension
+        script: |
+          set -e
+          SRC="${SRCROOT}/Keyboard/SharedData"
+          DST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SharedData"
+          if [ ! -d "$SRC/build" ]; then
+            echo "error: Rime SharedData missing or not precompiled at $SRC" >&2
+            exit 1
+          fi
+          echo "Copying Rime SharedData: $SRC -> $DST"
+          rm -rf "$DST"
+          cp -R "$SRC" "$DST"
+          du -sh "$DST"
   PinyinIMETests:
     type: bundle.unit-test
     platform: iOS
