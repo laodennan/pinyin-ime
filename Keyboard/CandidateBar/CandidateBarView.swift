@@ -19,7 +19,7 @@ final class CandidateBarView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        preeditLabel.font = .systemFont(ofSize: 15)
+        preeditLabel.font = .systemFont(ofSize: 16)
         preeditLabel.lineBreakMode = .byTruncatingHead
         addSubview(preeditLabel)
 
@@ -53,7 +53,7 @@ final class CandidateBarView: UIView {
         candidateButtons = candidates.enumerated().map { index, candidate in
             let button = UIButton(type: .system)
             button.setTitle(candidate.text, for: .normal)
-            button.titleLabel?.font = .systemFont(ofSize: 19)
+            button.titleLabel?.font = .systemFont(ofSize: 20)
             button.tag = index
             button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 9, bottom: 0, right: 9)
             button.addTarget(self, action: #selector(candidateTapped(_:)), for: .touchUpInside)
