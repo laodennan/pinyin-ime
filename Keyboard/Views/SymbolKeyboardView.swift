@@ -14,6 +14,8 @@ enum SymbolPanelAction {
 final class SymbolKeyboardView: UIView {
     var onSymbol: ((String) -> Void)?
     var onAction: ((SymbolPanelAction) -> Void)?
+    /// 退格连发 tick：参数为本次按住累计时长（同 26 键面板的约定）。
+    var onBackspaceHold: ((TimeInterval) -> Void)?
     var showsGlobeButton = false {
         didSet { if oldValue != showsGlobeButton { rebuildBottomRow() } }
     }
@@ -27,7 +29,7 @@ final class SymbolKeyboardView: UIView {
 
     private let hInset: CGFloat = 3
     private let hSpacing: CGFloat = 5
-    private let vSpacing: CGFloat = 9
+    private let vSpacing: CGFloat = 10
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -52,7 +54,7 @@ final class SymbolKeyboardView: UIView {
     private func rebuildBottomRow() {
         bottomRow.forEach { $0.removeFromSuperview() }
         bottomRow = []
-        func add(_ title: String, font: CGFloat = 15, function: Bool = true,
+        func add(_ title: String, font: CGFloat = 16, function: Bool = true,
                  repeatable: Bool = false, action: @escaping () -> Void) -> KeyButton {
             let button = KeyButton()
             button.setTitle(title, for: .normal)
@@ -73,13 +75,19 @@ final class SymbolKeyboardView: UIView {
         }
         _ = add("ABC") { [weak self] in self?.onAction?(.backToLetters) }
         _ = add("空格", function: false) { [weak self] in self?.onAction?(.space) }
-        _ = add("⌫", font: 19, repeatable: true) { [weak self] in self?.onAction?(.backspace) }
+        let backspace = add("⌫", font: 19, repeatable: true) { [weak self] in self?.onAction?(.backspace) }
+        backspace.onRepeatTick = { [weak self] elapsed in self?.onBackspaceHold?(elapsed) }
         returnButton = add("回车") { [weak self] in self?.onAction?(.enter) }
         setNeedsLayout()
     }
 
     func setReturnKeyTitle(_ title: String) {
         returnButton?.setTitle(title, for: .normal)
+    }
+
+    /// 回车键强调（.search/.send 场景的系统蓝，同 26 键面板）。
+    func setReturnKeyAccent(_ accent: Bool) {
+        returnButton?.isAccent = accent
     }
 
     override func layoutSubviews() {
