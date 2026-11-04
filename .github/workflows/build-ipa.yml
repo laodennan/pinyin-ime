@@ -111,11 +111,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.2.0-test >/dev/null 2>&1; then
-            gh release upload v0.2.0-test PinyinIME-unsigned.ipa --clobber
+          if gh release view v0.2.1-test >/dev/null 2>&1; then
+            gh release upload v0.2.1-test PinyinIME-unsigned.ipa --clobber
           else
-            gh release create v0.2.0-test \
-              --title "拼音输入法 v0.2 内测版" \
-              --notes "第二轮：苹果风格 UI 与交互对齐、九宫格真界面、词库瘦身（砍 tencent 大词库）与首屏不阻塞修复。未签名 IPA，需自签后安装。" \
+            gh release create v0.2.1-test \
+              --title "拼音输入法 v0.2.1 内测版" \
+              --notes "修复两处：①选字错位（分页换算误用空数组长度，改用引擎报告的页大小）；②点九宫格切换闪退回系统键盘（音节表注释文字被当音节解析崩溃，已做整行注释剔除与条目校验）。未签名 IPA，需自签后安装。" \
               PinyinIME-unsigned.ipa
           fi
