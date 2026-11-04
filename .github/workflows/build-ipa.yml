@@ -9,6 +9,9 @@ on:
 env:
   # 与 iOS 端 librime 版本严格对齐（LibrimeKit 0.1.0 内含 librime 1.16.1）。见 PLAN.md 2.2。
   LIBRIME_VERSION: "1.16.1"
+  # 已按 1.16.1 Release 资产列表核实（2026-11-04）；脚本内有同值默认值，此处显式声明防漂移。
+  LIBRIME_ASSET_RIME: "rime-de4700e-macOS-universal.tar.bz2"
+  LIBRIME_ASSET_DEPS: "rime-deps-de4700e-macOS-universal.tar.bz2"
   # 已锁定（2026-11-04，rime-ice main 的 HEAD，2026-10-31 的词库更新提交）。
   RIME_ICE_COMMIT: "99662ba01e3affa6a0f009174ca530b887bac3b6"
   XCODEGEN_VERSION: "2.44.1"
