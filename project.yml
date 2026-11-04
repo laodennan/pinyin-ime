@@ -39,7 +39,13 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mrzhao.pinyinime.keyboard
     sources:
-      - Keyboard
+      # SharedData 必须从 sources 排除：它已由下方 resources 的文件夹引用整体打包，
+      # 若再被 sources 逐文件收进资源阶段，会与文件夹副本同路径相撞
+      # （第 14 号运行的 13 条 "Multiple commands produce ...appex/*.schema.yaml" 即此）。
+      - path: Keyboard
+        excludes:
+          - "SharedData"
+          - "SharedData/**"
     info:
       path: Keyboard/Info.plist
       properties:
