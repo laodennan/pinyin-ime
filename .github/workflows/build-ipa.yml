@@ -80,6 +80,20 @@ jobs:
           zip -qry PinyinIME-unsigned.ipa Payload
           ls -la PinyinIME-unsigned.ipa
 
+      - name: Verify IPA contents (keyboard extension must carry precompiled Rime data)
+        run: |
+          set -e
+          rm -rf /tmp/ipa-verify && mkdir -p /tmp/ipa-verify
+          unzip -q PinyinIME-unsigned.ipa -d /tmp/ipa-verify
+          APPEX=$(find /tmp/ipa-verify -name '*.appex' -type d | head -1)
+          echo "== appex: $APPEX =="
+          test -d "$APPEX/SharedData/build"
+          BIN_COUNT=$(find "$APPEX/SharedData/build" -name '*.bin' | wc -l | tr -d ' ')
+          echo "precompiled .bin files: $BIN_COUNT"
+          test "$BIN_COUNT" -gt 0
+          du -sh "$APPEX"
+          echo "IPA contents verified."
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
