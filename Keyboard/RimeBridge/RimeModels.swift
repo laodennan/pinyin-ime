@@ -28,17 +28,27 @@ public struct RimeComposition: Equatable {
 
 /// 一页候选菜单（对应 Rime context 的 menu）。
 public struct RimeMenu: Equatable {
+    /// 当前页候选。注意：LibrimeKit 的 getContext 出于性能**不拷贝** menu 的
+    /// 候选数组（lrk_api.m 注释明示），桥接层拿到的恒为空——UI 显示用的
+    /// 全量候选走 allCandidates()，分页换算只用下面三个引擎报告值，
+    /// 绝不要拿 candidates.count 当页大小（v0.2 选字错位的根因）。
     public let candidates: [RimeCandidate]
     public let pageNumber: Int
     public let isLastPage: Bool
+    /// 引擎报告的每页候选数（schema 的 menu.page_size，雾凇为 5）。
+    public let pageSize: Int
+    /// 当前页实际候选数（末页可能小于 pageSize）。
+    public let currentPageCandidateCount: Int
     /// 当前高亮候选在整页中的下标（无则为 nil）。
     public let highlightedIndex: Int?
-    public init(candidates: [RimeCandidate], pageNumber: Int, isLastPage: Bool, highlightedIndex: Int?) {
+    public init(candidates: [RimeCandidate], pageNumber: Int, isLastPage: Bool, pageSize: Int, currentPageCandidateCount: Int, highlightedIndex: Int?) {
         self.candidates = candidates
         self.pageNumber = pageNumber
         self.isLastPage = isLastPage
+        self.pageSize = pageSize
+        self.currentPageCandidateCount = currentPageCandidateCount
         self.highlightedIndex = highlightedIndex
     }
 
-    public static let empty = RimeMenu(candidates: [], pageNumber: 0, isLastPage: true, highlightedIndex: nil)
+    public static let empty = RimeMenu(candidates: [], pageNumber: 0, isLastPage: true, pageSize: 5, currentPageCandidateCount: 0, highlightedIndex: nil)
 }

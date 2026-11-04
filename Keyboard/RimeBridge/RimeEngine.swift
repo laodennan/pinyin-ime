@@ -130,7 +130,7 @@ public final class LibrimeKitRimeEngine: RimeEngine {
         )
         traits.distributionName = "拼音输入法"
         traits.distributionCodeName = "PinyinIME"
-        traits.distributionVersion = "0.2.0"
+        traits.distributionVersion = "0.2.1"
         // 形如 "rime.<x>"，前缀让 librime 识别为自家日志命名（工厂默认 rime.moocat）。
         traits.appName = "rime.pinyinime"
 
@@ -228,13 +228,18 @@ public final class LibrimeKitRimeEngine: RimeEngine {
 
     public var menu: RimeMenu {
         guard isReady, let lrkMenu = Rime.shared.context().menu else { return .empty }
-        let candidates = Self.mapCandidates(lrkMenu.candidates ?? [])
+        // LRKMenu.candidates 恒为空（LibrimeKit 不拷贝，见 RimeModels 注释）；
+        // 分页换算改用引擎报告的 pageSize 与 numCandidates（当前页候选数）。
+        let pageSize = max(Int(lrkMenu.pageSize), 1)
+        let pageCount = Int(lrkMenu.numCandidates)
         let highlighted = Int(lrkMenu.highlightedCandidateIndex)
         return RimeMenu(
-            candidates: candidates,
+            candidates: [],
             pageNumber: Int(lrkMenu.pageNo),
             isLastPage: lrkMenu.isLastPage,
-            highlightedIndex: (highlighted >= 0 && highlighted < candidates.count) ? highlighted : nil
+            pageSize: pageSize,
+            currentPageCandidateCount: pageCount,
+            highlightedIndex: (highlighted >= 0 && highlighted < pageCount) ? highlighted : nil
         )
     }
 
