@@ -18,10 +18,18 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-15 默认 Xcode 16.x。第 13 号运行的教训：macos-14 的 Xcode 15.4 读不了
+    # XcodeGen 2.44 生成的新版工程格式（objectVersion 77），Archive 步直接报
+    # "future Xcode project file format"。下面 Select Xcode 16 一步再兜底显式选 16.x。
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
 
       - name: Cache assembled Rime data (incl. precompiled .bin)
         id: rimedata-cache
