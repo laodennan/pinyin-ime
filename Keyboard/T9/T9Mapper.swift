@@ -46,8 +46,11 @@ public final class T9Mapper {
     }
 
     /// 从打包资源 syllables.txt 加载（空格/换行分隔）。
+    /// 资源可能被打进 appex 根目录，也可能保留 T9/ 子目录层级，两种都试。
     public convenience init?(bundle: Bundle = .main, resource: String = "syllables") {
-        guard let url = bundle.url(forResource: resource, withExtension: "txt"),
+        let url = bundle.url(forResource: resource, withExtension: "txt")
+            ?? bundle.url(forResource: resource, withExtension: "txt", subdirectory: "T9")
+        guard let url,
               let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let list = raw.split { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "\r" }
             .map(String.init)
